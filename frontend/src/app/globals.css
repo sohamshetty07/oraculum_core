@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  /* Enterprise Slate Palette */
+  --background: #F8FAFC; /* Slate 50 */
+  --surface: #FFFFFF;
+  --text-primary: #1E293B; /* Slate 800 */
+  --text-secondary: #64748B; /* Slate 500 */
+  --border: #E2E8F0; /* Slate 200 */
+  
+  /* Brand Color (Deep Indigo) */
+  --primary: #4F46E5; 
+  --primary-hover: #4338CA;
+  --accent: #8B5CF6; /* For AI moments */
+}
+
+body {
+  background: var(--background);
+  color: var(--text-primary);
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Custom Utilities for Professional UI */
+@utility card-base {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+@utility input-base {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  transition: all 0.2s;
+
+  /* FIX: Nest the focus state here instead of creating a separate utility */
+  &:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
+  }
+}
+
+@utility text-accent {
+  color: var(--primary);
+}
