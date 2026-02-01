@@ -1,331 +1,267 @@
 # python_bridge/inference_worker.py
+# SYSTEM V4: FEDERATED TRIAD & ROBUST CONTEXT SHARDING
+
 import sys
 import json
 import base64
 import io
-import hashlib
 import re
+import urllib.parse
 import networkx as nx 
 import lancedb
+import requests
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from mlx_vlm import load, generate
 from PIL import Image
 
-# --- RESEARCH AGENT TOOLS ---
-from duckduckgo_search import DDGS
-import trafilatura
-
 # --- CONFIGURATION ---
 MODEL_PATH = "mlx-community/Phi-3.5-vision-instruct-4bit"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2" 
 DB_PATH = "./data/lancedb_store"
+USER_AGENT = 'OraculumMarketBot/1.0 (Student Project)'
 
-# --- GLOBAL MEMORY STATE (MAGMA LAYER) ---
-# We use a Directed Graph to store Agent Opinions and Relationships
+# --- GLOBAL MEMORY STATE ---
 memory_graph = nx.DiGraph()
-ddgs = DDGS() # Persistent Search Client
 
 # --- INITIALIZATION ---
 print(json.dumps({"status": "loading_models"}), flush=True)
 
 try:
-    # 1. Load GenAI Model (Vision + Text)
     model, processor = load(MODEL_PATH, trust_remote_code=True)
-    
-    # 2. Load Embedding Model (for RAG)
     embed_model = SentenceTransformer(EMBEDDING_MODEL)
-    
-    # 3. Setup Vector DB
     db = lancedb.connect(DB_PATH)
-    
     print(json.dumps({"status": "ready"}), flush=True)
 except Exception as e:
     print(json.dumps({"status": "error", "message": f"Startup Error: {str(e)}"}), flush=True)
     sys.exit(1)
 
+# --- HELPER: ROBUST QUERY RELAXATION ---
+def clean_query_step(query):
+    """Recursively simplifies a query until APIs respond."""
+    original = query
+    # Remove measurements and marketing fluff
+    query = re.sub(r'\b\d+(ml|g|kg|L|oz)\b', '', query, flags=re.IGNORECASE)
+    query = re.sub(r'\(.*?\)|pack of \d+|official|review', '', query, flags=re.IGNORECASE)
+    query = re.sub(r'\b(for|with|and|flavor|flavour|variant)\b', '', query, flags=re.IGNORECASE)
+    query = " ".join(query.split()) # Collapse whitespace
+    
+    if query == original: # If regex fails, chop last word
+        tokens = query.split()
+        if len(tokens) > 1: query = " ".join(tokens[:-1])
+    return query
+
+# --- TOOL 1: FEDERATED RESEARCH (Voices + Context) ---
+def perform_federated_research(topic, audience_context):
+    """
+    Queries Reddit (Voices) and Wikipedia (Context).
+    Uses query relaxation if direct hits fail.
+    """
+    voices = []
+    
+    # 1. REDDIT (The Voice)
+    current_q = topic
+    for _ in range(3): # Retry loop
+        try:
+            url = f"https://www.reddit.com/search.json?q={urllib.parse.quote(current_q)}&sort=relevance&limit=8"
+            resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=5)
+            if resp.status_code == 200:
+                posts = resp.json().get('data', {}).get('children', [])
+                if posts:
+                    for p in posts:
+                        title = p['data']['title']
+                        if len(title) > 15: voices.append(title)
+                    break # Found data, stop relaxing
+        except: pass
+        
+        # Relax query for next loop
+        new_q = clean_query_step(current_q)
+        if new_q == current_q: break
+        current_q = new_q
+
+    # 2. WIKIPEDIA (The Context)
+    wiki_summary = ""
+    brand_guess = topic.split()[0]
+    try:
+        url = "https://en.wikipedia.org/w/api.php"
+        params = {
+            "action": "query", "format": "json", "prop": "extracts",
+            "exintro": True, "explaintext": True, "titles": brand_guess
+        }
+        resp = requests.get(url, params=params, headers={'User-Agent': USER_AGENT}, timeout=4)
+        data = resp.json().get("query", {}).get("pages", {})
+        for _, page in data.items():
+            if "extract" in page:
+                wiki_summary = page["extract"][:300]
+                voices.append(f"[Context] Brand Background: {wiki_summary}...")
+                break
+    except: pass
+
+    if not voices:
+        return ["SYSTEM_ALERT: No digital footprint found. The product might be too new or niche."]
+    
+    return list(set(voices))[:15]
+
+# --- TOOL 2: FACT CHECK (OpenFoodFacts + Wiki) ---
+def perform_fact_check(query):
+    """
+    Queries OpenFoodFacts for FMCG specs.
+    """
+    current_q = query
+    for _ in range(3):
+        try:
+            # OpenFoodFacts API
+            url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={urllib.parse.quote(current_q)}&search_simple=1&action=process&json=1"
+            resp = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=6)
+            products = resp.json().get('products', [])
+            
+            if products:
+                p = products[0]
+                specs = (
+                    f"Product: {p.get('product_name', 'Unknown')}\n"
+                    f"Brand: {p.get('brands', 'Unknown')}\n"
+                    f"NutriScore: {p.get('nutriscore_grade', '?').upper()}\n"
+                    f"Ingredients: {', '.join(p.get('ingredients_tags', [])[:5])}..."
+                )
+                return specs
+        except: pass
+        
+        # Relax
+        new_q = clean_query_step(current_q)
+        if new_q == current_q: break
+        current_q = new_q
+
+    return "SYSTEM_ALERT: No structured data found in Open Databases."
+
+# --- HELPER: CONTEXT SHARDING ---
+def get_sharded_context(agent_name, topic):
+    """
+    Prevents 'Echo Chamber' by giving different agents different memories.
+    Uses hashing on the agent's name to deterministically assign a shard.
+    """
+    if not memory_graph.has_node(topic): return ""
+    
+    all_opinions = []
+    for peer in memory_graph.predecessors(topic):
+        if peer == agent_name: continue
+        edge = memory_graph.get_edge_data(peer, topic)
+        all_opinions.append(f"- {peer}: \"{edge.get('content','...')}\"")
+    
+    if not all_opinions: return ""
+
+    # SHARDING LOGIC
+    # Agent 'Aryan' -> hash -> index 0
+    # Agent 'Rohan' -> hash -> index 1
+    shard_index = sum(ord(c) for c in agent_name) % 3
+    
+    shard_size = max(1, len(all_opinions) // 2)
+    start = (shard_index * shard_size) % len(all_opinions)
+    
+    # Return a slice of opinions, not all of them
+    selected = all_opinions[start : start + 3]
+    
+    return "\n[WHAT OTHERS ARE SAYING - YOUR FEED]:\n" + "\n".join(selected) + "\n"
+
 # --- HELPER: PDF PROCESSING ---
 def process_pdf(pdf_b64):
-    """Decodes PDF, chunks text, returns chunks."""
     try:
         pdf_data = base64.b64decode(pdf_b64)
         reader = PdfReader(io.BytesIO(pdf_data))
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        
+        text = "".join([page.extract_text() for page in reader.pages])
         words = text.split()
-        chunk_size = 200
-        overlap = 50
-        chunks = []
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = " ".join(words[i:i + chunk_size])
-            chunks.append(chunk)
-        return chunks
-    except Exception as e:
-        return []
+        return [" ".join(words[i:i+200]) for i in range(0, len(words), 150)]
+    except: return []
 
-# --- TOOL 1: DEEP RESEARCH AGENT (Robust Mode) ---
-def perform_deep_research(topic, audience_context):
-    """
-    Autonomous Research Loop.
-    Strategy: 
-    1. Capture search snippets IMMEDIATELY (Fast Voices).
-    2. Try to scrape full pages for deeper context (Deep Voices).
-    3. Aggregate and deduplicate.
-    """
-    collected_voices = []
-    clean_topic = topic.split('(')[0].strip()
-    
-    # Layered Search Queries
-    search_layers = [
-        # Layer 1: Specific Intent
-        [f"{topic} reddit", f"{topic} review", f"{topic} complaints"],
-        # Layer 2: Broad Topic + Region (Try to hit forums)
-        [f"{clean_topic} india discussion", f"{clean_topic} taste test", f"{clean_topic} price opinion"],
-        # Layer 3: Category level
-        [f"best {clean_topic} brand reviews", f"packaged {clean_topic} feedback"]
-    ]
-    
-    seen_content = set()
-
-    for layer in search_layers:
-        if len(collected_voices) >= 12: break
-        
-        for q in layer:
-            try:
-                # Get results. We assume generic region to cast a wide net, 
-                # but if product is specific, DDG handles it well.
-                results = ddgs.text(q, max_results=3)
-                if not results: continue
-
-                for r in results:
-                    # STRATEGY 1: SNIPPET CAPTURE (Guaranteed Data)
-                    # Often the snippet itself contains the "Voice" we need.
-                    snippet = r['body']
-                    if len(snippet) > 60 and snippet not in seen_content:
-                        collected_voices.append(f"[Snippet] {snippet}")
-                        seen_content.add(snippet)
-
-                    # STRATEGY 2: DEEP SCRAPE (Best Effort)
-                    try:
-                        url = r['href']
-                        downloaded = trafilatura.fetch_url(url)
-                        if downloaded:
-                            text = trafilatura.extract(downloaded)
-                            if text:
-                                # Find paragraph-sized chunks that look like opinions
-                                paras = [p for p in text.split('\n') if 80 < len(p) < 500]
-                                for p in paras[:2]: # Take top 2 meaningful paragraphs
-                                    if p not in seen_content:
-                                        collected_voices.append(p)
-                                        seen_content.add(p)
-                    except:
-                        pass # Ignore scraping failures, rely on snippets
-            except:
-                continue
-
-    # 3. SYNTHESIS PHASE
-    if not collected_voices:
-        # STRICT: No synthetic fallback. If we fail, we fail honestly.
-        return ["SYSTEM_ALERT: No wild voices found. The internet is silent on this specific topic."]
-        
-    # Return top results, mixing snippets and deep scrapes
-    return list(collected_voices)[:15]
-
-# --- TOOL 2: FACT CHECK AGENT (Robust Specs) ---
-def perform_fact_check(query):
-    """
-    Searches for official specifications.
-    Uses snippets immediately to build context buffer, avoiding empty returns.
-    """
-    context_buffer = ""
-    clean_query = query.split('(')[0].strip()
-    
-    try:
-        # Broader query to catch e-commerce listings which have specs
-        results = ddgs.text(f"{clean_query} specifications price ingredients release date", max_results=4)
-        
-        if results:
-            for r in results:
-                context_buffer += f"Source: {r['title']}\nSnippet: {r['body']}\n---\n"
-                
-                # Try one deep read for the top result
-                if len(context_buffer) < 500: # Only if we need more info
-                    try:
-                        downloaded = trafilatura.fetch_url(r['href'])
-                        text = trafilatura.extract(downloaded)
-                        if text:
-                            context_buffer += f"\nDeep Info: {text[:1000]}\n"
-                    except: pass
-    except Exception as e:
-        return f"Error searching facts: {str(e)}"
-
-    if not context_buffer:
-        return "SYSTEM_ALERT: No verifiable facts found online."
-
-    # Synthesize
-    prompt = f"<|user|>Extract factual specs for '{query}' from this data:\n{context_buffer}\nOUTPUT FORMAT:\nSpecs: ...\nPrice: ...\nOrigin: ...<|end|>\n<|assistant|>"
-    
-    try:
-        response = generate(model, processor, prompt, max_tokens=300, verbose=False)
-        return response.text.split("<|end|>")[0].strip()
-    except Exception as e:
-        return f"Error synthesizing facts: {str(e)}"
-
-# --- MAGMA ENGINE: GRAPH OPERATIONS ---
-
+# --- MAGMA MEMORY UPDATE ---
 def _update_graph_memory(agent_name, response_text, topic):
     try:
         sentiment = 0.0
-        lower_res = response_text.lower()
-        if any(w in lower_res for w in ["love", "great", "excellent", "buy", "amazing", "yes"]):
-            sentiment = 1.0
-        elif any(w in lower_res for w in ["hate", "bad", "terrible", "avoid", "expensive", "no"]):
-            sentiment = -1.0
-            
+        lower = response_text.lower()
+        if "love" in lower or "great" in lower: sentiment = 1.0
+        elif "hate" in lower or "bad" in lower: sentiment = -1.0
+        
         memory_graph.add_node(agent_name, type="agent")
         memory_graph.add_node(topic, type="topic")
-        
-        # Store sentiment and a snippet for retrieval
         memory_graph.add_edge(agent_name, topic, relation="has_opinion", weight=sentiment, content=response_text[:120])
-    except Exception as e:
-        pass 
-
-def _retrieve_graph_context(current_agent, topic, limit=5):
-    if not memory_graph.has_node(topic):
-        return ""
-
-    context = []
-    predecessors = list(memory_graph.predecessors(topic))
-    
-    for agent in predecessors:
-        if agent == current_agent: continue 
-        
-        edge_data = memory_graph.get_edge_data(agent, topic)
-        sentiment = "positive" if edge_data['weight'] > 0 else "negative" if edge_data['weight'] < 0 else "neutral"
-        snippet = edge_data.get('content', '...')
-        
-        context.append(f"- {agent} was {sentiment}: \"{snippet}...\"")
-    
-    if not context:
-        return ""
-        
-    return "\n[MEMORY] What others have said:\n" + "\n".join(context[:limit]) + "\n"
+    except: pass 
 
 # --- MAIN LOOP ---
 for line in sys.stdin:
-    if not line:
-        break
-        
+    if not line: break
     try:
         req = json.loads(line)
         
         # === COMMAND ROUTER ===
         
-        # MODE 1: DEEP RESEARCH
+        # TASK 1: RESEARCH (Federated)
         if req.get("task") == "research":
-            product = req.get("product")
-            context = req.get("context")
-            voices = perform_deep_research(product, context)
+            voices = perform_federated_research(req.get("product"), req.get("context"))
             print(json.dumps({"status": "success", "research_data": voices}), flush=True)
             continue
 
-        # MODE 2: FACT CHECK
+        # TASK 2: FACT CHECK (Open DBs)
         if req.get("task") == "get_facts":
-            query = req.get("query")
-            fact_sheet = perform_fact_check(query)
-            print(json.dumps({"status": "success", "fact_sheet": fact_sheet}), flush=True)
+            fact = perform_fact_check(req.get("query"))
+            print(json.dumps({"status": "success", "fact_sheet": fact}), flush=True)
             continue
 
-        # MODE 3: INFERENCE (Standard Generation)
+        # TASK 3: INFERENCE
         prompt = req.get("prompt", "")
         max_tokens = req.get("max_tokens", 300)
-        image_b64 = req.get("image", None)
-        pdf_b64 = req.get("pdf", None)
         
-        # --- METADATA & CONTEXT ---
-        agent_name = "Unknown"
+        # Metadata
+        agent = "Unknown"
         topic = "General"
-        
-        # Extract metadata from prompt (sent by Rust)
-        if "Name:" in prompt: 
-            agent_name = prompt.split("Name:")[1].split("\n")[0].strip()
-        if "Topic:" in prompt: 
-            topic = prompt.split("Topic:")[1].split("\n")[0].strip()
+        if "Name:" in prompt: agent = prompt.split("Name:")[1].split("\n")[0].strip()
+        if "Topic:" in prompt: topic = prompt.split("Topic:")[1].split("\n")[0].strip()
 
-        # RAG / Graph Retrieval
-        rag_context = ""
+        # Context Assembly (Sharded)
+        sharded_ctx = get_sharded_context(agent, topic)
         
-        # Vector DB (PDFs)
-        if pdf_b64:
-            pdf_hash = hashlib.md5(pdf_b64.encode()).hexdigest()
+        # RAG (PDFs)
+        rag_ctx = ""
+        if req.get("pdf"):
+            pdf_hash = hashlib.md5(req.get("pdf").encode()).hexdigest()
             table_name = f"doc_{pdf_hash}"
             if table_name not in db.list_tables():
-                chunks = process_pdf(pdf_b64)
+                chunks = process_pdf(req.get("pdf"))
                 if chunks:
-                    embeddings = embed_model.encode(chunks)
-                    data = [{"vector": e, "text": c} for e, c in zip(embeddings, chunks)]
+                    vecs = embed_model.encode(chunks)
+                    data = [{"vector": v, "text": t} for v, t in zip(vecs, chunks)]
                     db.create_table(table_name, data=data)
             
-            if table_name in db.list_tables():
-                tbl = db.open_table(table_name)
-                query_vec = embed_model.encode([prompt])[0]
-                results = tbl.search(query_vec).limit(2).to_pandas()
-                rag_context += "\n[DOCS]:\n"
-                for _, row in results.iterrows():
-                    rag_context += f"- {row['text'][:200]}...\n"
+            tbl = db.open_table(table_name)
+            q_vec = embed_model.encode([prompt])[0]
+            res = tbl.search(q_vec).limit(2).to_pandas()
+            for _, r in res.iterrows(): rag_ctx += f"- {r['text'][:200]}...\n"
 
-        # Graph Memory
-        graph_context = _retrieve_graph_context(agent_name, topic)
-
-        # --- PROMPT ASSEMBLY (FIXED DOUBLE-WRAPPING) ---
-        # The Rust backend sends prompts wrapped in <|user|>...
-        # We must inject our context *inside* that tag, not wrap it again.
-        
-        combined_context = f"{rag_context}\n{graph_context}"
+        # Final Prompt Injection
+        final_context = f"{rag_ctx}\n{sharded_ctx}"
         
         if "<|user|>" in prompt:
-            # Inject context after the first <|user|> tag
-            # Pattern: <|user|> ... content ...
-            # Result: <|user|>\n[MEMORY]...\n ... content ...
-            full_prompt = prompt.replace("<|user|>", f"<|user|>\n{combined_context}\n", 1) + "<|end|>\n<|assistant|>"
+            full_prompt = prompt.replace("<|user|>", f"<|user|>\n{final_context}\n", 1) + "<|end|>\n<|assistant|>"
         else:
-            # Fallback if raw text is sent
-            full_prompt = f"<|user|>\n{combined_context}\n{prompt}<|end|>\n<|assistant|>"
+            full_prompt = f"<|user|>\n{final_context}\n{prompt}<|end|>\n<|assistant|>"
 
-        # --- VISION / TEXT HANDLING ---
-        processed_images = None
-        
-        if image_b64:
+        # Generate
+        images = None
+        if req.get("image"):
             try:
-                raw = base64.b64decode(image_b64)
-                img = Image.open(io.BytesIO(raw))
-                processed_images = [img]
-                # Ensure <|image_1|> tag exists
+                img = Image.open(io.BytesIO(base64.b64decode(req.get("image"))))
+                images = [img]
                 if "<|image_1|>" not in full_prompt:
                      full_prompt = full_prompt.replace("<|user|>", "<|user|>\n<|image_1|>", 1)
-            except:
-                pass
+            except: pass
 
-        # --- GENERATION ---
-        if processed_images:
-             response = generate(model, processor, full_prompt, processed_images, max_tokens=max_tokens, verbose=False, temp=0.7)
+        if images:
+             res = generate(model, processor, full_prompt, images, max_tokens=max_tokens, verbose=False)
         else:
-             response = generate(model, processor, full_prompt, max_tokens=max_tokens, verbose=False, temp=0.7)
+             res = generate(model, processor, full_prompt, max_tokens=max_tokens, verbose=False)
+            
+        final_text = res.text.split("<|end|>")[0].strip()
+        _update_graph_memory(agent, final_text, topic)
         
-        res = response.text if hasattr(response, "text") else str(response)
-        
-        # Cleanup output
-        if "<|end|>" in res:
-            res = res.split("<|end|>")[0]
-        
-        res_clean = res.strip()
-
-        # Update Memory
-        _update_graph_memory(agent_name, res_clean, topic)
-
-        print(json.dumps({"status": "success", "text": res_clean}), flush=True)
+        print(json.dumps({"status": "success", "text": final_text}), flush=True)
 
     except Exception as e:
-        print(json.dumps({"status": "error", "message": f"Brain Error: {str(e)}"}), flush=True)
+        print(json.dumps({"status": "error", "message": str(e)}), flush=True)

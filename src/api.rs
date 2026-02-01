@@ -9,8 +9,8 @@ use crate::scenarios::Scenario;
 use crate::persona_generator::PersonaGenerator;
 use crate::focus_group::FocusGroupSession;
 use crate::analyst::AnalystEngine;
-use crate::scout::MarketScout; 
-use crate::wiki::WikiScout; 
+// REMOVED: crate::scout::MarketScout and crate::wiki::WikiScout 
+// (Logic is now handled by the Python Brain via Federated Triad)
 use std::thread;
 use std::time::Duration; 
 
@@ -87,36 +87,41 @@ pub async fn start_simulation(
     thread::spawn(move || {
         println!("🚀 API: Starting Job {} [Scenario: {}]", job_id_clone, req_scenario);
 
-        // --- STEP 0: HYBRID INTELLIGENCE GATHERING (Optimized) ---
+        // --- STEP 0: FEDERATED INTELLIGENCE GATHERING (The Triad) ---
         
-        // 1. RIGHT BRAIN (Wild Scout): Fetch raw human emotion/opinions
-        // Passing '&brain' to enable Semantic Query Expansion & Deep Research (Phase B)
-        let wild_voices = MarketScout::fetch_customer_voices(&req_product, &req_context, &brain);
+        // 1. CHANNEL 1 & 2: RESEARCH (Voices + Brand Context)
+        // Calls Python: {"task": "research"} -> Reddit & Wikipedia
+        println!("🕵️ SCOUT: Initiating Federated Research (Reddit + Wiki)...");
+        let research_data = brain.research(&req_product, &req_context);
         
-        // 2. LEFT BRAIN (Wiki Scout): Fetch objective facts to ground the AI
-        // UPDATED: Now passing '&brain' to allow the Python Fact Agent to run (Wiki + Search Fallback)
-        let wiki_fact = WikiScout::fetch_summary(&req_product, &brain)
-            .unwrap_or_else(|| "No specific encyclopedic data found.".to_string());
+        // 2. CHANNEL 3: FACTS (Hard Specs)
+        // Calls Python: {"task": "get_facts"} -> OpenFoodFacts
+        println!("📦 SCOUT: Fetching Product Specifications...");
+        let fact_sheet = brain.get_facts(&req_product);
 
-        // 3. ASSEMBLE CONTEXT (Manual Construction)
-        let voices_text = if wild_voices.is_empty() {
-            "No recent online chatter.".to_string()
+        // 3. ASSEMBLE ENRICHED CONTEXT
+        let voices_text = if research_data.is_empty() {
+            "No direct consumer discussions found online.".to_string()
         } else {
-            wild_voices.join("\n---\n")
+            research_data.join("\n---\n")
         };
 
+        // We build a Master Context string that includes the specs and the market noise.
+        // This ensures the Agents AND the Scenario know what the product actually is.
         let enriched_context = format!(
-            "PRODUCT: {}\nUSER CONTEXT: {}\n\n--- FACTUAL KNOWLEDGE (Specs & Facts) ---\n{}\n\n--- MARKET CHATTER (Real Internet Opinions) ---\n{}", 
+            "PRODUCT: {}\nUSER CONTEXT: {}\n\n--- FACTUAL SPECS (Open Database) ---\n{}\n\n--- MARKET RESEARCH (Reddit Voices & Wiki) ---\n{}", 
             req_product, 
             req_context, 
-            wiki_fact, 
+            fact_sheet, 
             voices_text
         );
         // ------------------------------------------------
 
-        // --- STEP 1: DOPPELGÄNGER GENERATION ---
-        // Pass the wild voices to the generator to create agents based on them.
-        let agents = PersonaGenerator::generate_from_voices(req_count, &req_target, wild_voices, &brain);
+        // --- STEP 1: DOPPELGÄNGER GENERATION (Sharded) ---
+        // We pass the raw 'research_data' (list of strings) to the generator.
+        // The Python side will handle 'Context Sharding' (giving different agents different snippets)
+        // during the actual inference if we implemented that logic, or we use the list here to seed personas.
+        let agents = PersonaGenerator::generate_from_voices(req_count, &req_target, research_data, &brain);
         
         if let Some(mut job) = jobs.get_mut(&job_id_clone) {
             job.agents = agents.clone();
@@ -158,7 +163,7 @@ pub async fn start_simulation(
                         prompt: msg.phase.clone(),
                         response: msg.content,
                         
-                        // FIX: Now mapping the captured thought process from the Focus Group
+                        // Capture the hidden thought process
                         thought_process: msg.thought_process.clone(), 
                         
                         sentiment: "active".to_string(),
@@ -178,7 +183,7 @@ pub async fn start_simulation(
             }
         } else {
             // --- STANDARD PARALLEL MODE ---
-            // Agents now receive the 'enriched_context' containing Wiki + Market Data
+            // Agents receive the 'enriched_context' containing Facts + Voices
             let scenario: Box<dyn Scenario> = match req_scenario.as_str() {
                 "creative_test" => Box::new(crate::scenarios::CreativeTestScenario::new(
                     &req_product, 

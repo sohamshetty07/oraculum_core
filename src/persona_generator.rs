@@ -1,118 +1,130 @@
 // src/persona_generator.rs
-// ROBUST VERSION: Doppelgänger Engine (Wild Mode) & Memory Enabled
-// UPDATE: Added Duplicate Name Prevention
+// DYNAMIC VERSION: Context-Sharded Doppelgänger Engine
+// FEATURES: 
+// 1. Shards 'Wild Voices' so agents have unique backstories.
+// 2. Uses 'Diversity Seeds' to force LLM variance (preventing name collision).
+// 3. No Hardcoded Names.
 
 use crate::brain::AgentBrain;
 use crate::agent_swarm::Agent;
 use crate::memory::MemoryStream; 
 use std::sync::{Arc, Mutex}; 
 use serde_json::Value;
-use std::collections::HashSet; // <--- NEW: For tracking names
+use std::collections::HashSet;
 
 pub struct PersonaGenerator;
 
 impl PersonaGenerator {
-    // NEW: The Core Generator that can use Wild Internet Data
     pub fn generate_from_voices(
         count: usize, 
         audience_criteria: &str, 
-        real_voices: Vec<String>, // <--- The Wild Data
+        real_voices: Vec<String>, 
         brain: &Arc<AgentBrain>
     ) -> Vec<Agent> {
         
         let mut agents = Vec::new();
         let mut global_id_counter = 1; 
-        
-        // NEW: Track used names to prevent duplicates in the same simulation
         let mut used_names = HashSet::new();
 
-        // Construct the "DNA" for the agents
-        let voice_context = if !real_voices.is_empty() {
-            format!("Here are REAL comments from the internet about this topic. \
-            Use these to model the personalities, speaking styles, and skepticism levels of the agents. \
-            Make the agents feel like the authors of these comments:\n\n{}", real_voices.join("\n---\n"))
-        } else {
-            "No internet voices found. Generate realistic personas based on the target group constraints.".to_string()
-        };
+        println!("✨ GENERATOR: Synthesizing {} unique personas for target: '{}'...", count, audience_criteria);
 
-        println!("✨ GENERATOR: Synthesizing {} unique personas for target: '{}' (Wild Mode: {})...", 
-            count, audience_criteria, !real_voices.is_empty());
-
-        let batch_size = 5;
+        // CONFIGURATION
+        let batch_size = 5; // We generate 5 agents at a time to keep LLM context stable
         let batches = (count as f32 / batch_size as f32).ceil() as usize;
 
-        for _ in 0..batches {
-            if agents.len() >= count {
-                break;
-            }
+        for batch_idx in 0..batches {
+            if agents.len() >= count { break; }
 
-            // UPDATED PROMPT: Forces Voice & Skepticism based on real data
+            // --- STRATEGY 1: VOICE SHARDING ---
+            // Don't give every agent every comment. Slice the data.
+            // Batch 0 gets comments 0-4, Batch 1 gets 5-9, etc.
+            let start_voice = (batch_idx * 3) % real_voices.len().max(1);
+            let end_voice = ((batch_idx + 1) * 3).min(real_voices.len());
+            
+            let voice_subset = if !real_voices.is_empty() && start_voice < real_voices.len() {
+                real_voices[start_voice..end_voice].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let voice_context = if !voice_subset.is_empty() {
+                format!("SOURCE MATERIAL (Base personalities on these SPECIFIC real comments):\n{}\n\n", voice_subset.join("\n---\n"))
+            } else {
+                String::new()
+            };
+
+            // --- STRATEGY 2: DIVERSITY SEEDS ---
+            // If we don't guide the LLM, it defaults to the most probable average person.
+            // We force it to look at different corners of the room for each batch.
+            let archetype_instruction = match batch_idx % 4 {
+                0 => "FOCUS: Early Adopters & Optimists. Names should be modern.",
+                1 => "FOCUS: Skeptics & Budget-Conscious. Names should be traditional.",
+                2 => "FOCUS: Quality-Conscious & Brand Loyalists. Mix of names.",
+                _ => "FOCUS: Critics & Detractors. Diverse names."
+            };
+
+            // --- THE PROMPT ---
             let prompt = format!(
-                "<|user|>Task: Generate a JSON array of 5 realistic Indian consumer personas matching: '{}'. \
-                \n\nSOURCE MATERIAL (Model personalities on this):\n{}\n\n\
-                CONSTRAINTS:\n\
-                1. DIVERSITY: If source material has angry people, make angry agents. If fans, make fans.\n\
-                2. Names: Culturally accurate to Region/Gender defined in target.\n\
-                3. SPEAKING STYLE: Capture the vibe (e.g., 'Rant', 'Analytical', 'Short', 'Excited').\n\
-                4. SKEPTICISM: Must vary ('High', 'Medium', 'Low').\n\
+                "<|user|>Task: Generate a JSON array of {} unique Indian consumer personas matching: '{}'.\n\n\
+                {}\
+                \n\
+                DIVERSITY INSTRUCTION: {}\n\
+                CRITICAL RULES:\n\
+                1. NO REPEATED NAMES (e.g. Do not use Aryan or Rohan if possible, be creative).\n\
+                2. VARY THE SKEPTICISM: Not everyone agrees.\n\
+                3. REALISM: Use the Source Material to define their 'speaking_style'.\n\
                 \n\
                 Format: [{{ \"name\": \"...\", \"age\": 20, \"city\": \"...\", \"occupation\": \"...\", \"spending_behavior\": \"...\", \"cultural_values\": \"...\", \"speaking_style\": \"...\", \"skepticism_level\": \"...\" }}] \
                 \n\
                 Return ONLY JSON. No text.<|end|>\n<|assistant|>",
-                audience_criteria, voice_context
+                batch_size, 
+                audience_criteria, 
+                voice_context, 
+                archetype_instruction
             );
 
-            // Ask Brain (Python)
-            // Increased token limit slightly to handle the richer JSON
-            let response_text = brain.generate(&prompt, 1200, None, None); 
-            
-            // AGGRESSIVE CLEANUP
+            // Call Python Brain
+            let response_text = brain.generate(&prompt, 1500, None, None); 
             let clean_json = clean_json_text(&response_text);
             
+            // Parse & Build
             if let Ok(parsed) = serde_json::from_str::<Value>(&clean_json) {
                 if let Some(array) = parsed.as_array() {
                     for item in array {
-                        if agents.len() >= count {
-                            break;
-                        }
+                        if agents.len() >= count { break; }
 
-                        let raw_name = item["name"].as_str().unwrap_or("Agent").to_string();
+                        let mut raw_name = item["name"].as_str().unwrap_or("Agent").to_string();
                         
-                        // --- FIX: Ensure unique names. If duplicate, append ID. ---
-                        let name = if used_names.contains(&raw_name) {
-                            format!("{} ({})", raw_name, global_id_counter)
-                        } else {
-                            used_names.insert(raw_name.clone());
-                            raw_name
-                        };
-                        // ----------------------------------------------------------
+                        // Fallback duplicate handler (just in case LLM ignores us)
+                        if used_names.contains(&raw_name) {
+                            raw_name = format!("{} {}", raw_name, global_id_counter);
+                        }
+                        used_names.insert(raw_name.clone());
 
                         let id = global_id_counter;
                         global_id_counter += 1;
                         
+                        // Extract fields with defaults
                         let role = item["occupation"].as_str().unwrap_or("Consumer").to_string();
-                        let city = item["city"].as_str().unwrap_or("India").to_string();
+                        let city = item["city"].as_str().unwrap_or("Metro").to_string();
                         let age = item["age"].as_u64().unwrap_or(25);
                         let spending = item["spending_behavior"].as_str().unwrap_or("Moderate").to_string();
                         let culture = item["cultural_values"].as_str().unwrap_or("Traditional").to_string();
-                        
-                        // NEW FIELDS
                         let style = item["speaking_style"].as_str().unwrap_or("Neutral").to_string();
                         let skepticism = item["skepticism_level"].as_str().unwrap_or("Medium").to_string();
 
-                        // Construct the rich demographic string
+                        // Rich demographic string for context injection later
                         let full_demographic = format!("{}, {}y/o, {}, {}", city, age, role, spending);
                         
                         let agent = Agent {
                             id,
-                            name: name.clone(),
+                            name: raw_name.clone(),
                             role: role.clone(),
                             demographic: full_demographic,
                             beliefs: vec![culture, spending.clone()],
                             spending_profile: spending,
-                            product_affinity: vec!["Consumer Goods".to_string()],
+                            product_affinity: vec!["General".to_string()],
                             messaging_resonance: vec![],
-                            // Assign generated personality
                             speaking_style: style.clone(),
                             skepticism_level: skepticism.clone(),
                             simulated_responses: 0,
@@ -120,66 +132,52 @@ impl PersonaGenerator {
                             memory: Arc::new(Mutex::new(MemoryStream::new())), 
                         };
                         
-                        println!("   └── Created: {} ({}) [Style: {} | Skepticism: {}]", name, role, style, skepticism);
+                        println!("   └── Created: {} ({}) [Style: {}]", raw_name, role, style);
                         agents.push(agent);
                     }
                 }
             } else {
-                println!("   ⚠️ LLM Error. Using Fallback.");
-                println!("   🔴 RAW OUTPUT: {:?}", response_text); 
-                
-                // Fallback logic
-                let remaining_needed = count - agents.len();
-                if remaining_needed > 0 {
-                    let backup = get_fallback_agents(global_id_counter, remaining_needed, audience_criteria);
-                    global_id_counter += backup.len() as u32;
-                    agents.extend(backup);
-                }
+                // Fallback if JSON breaks
+                println!("   ⚠️ JSON Parse Error. Generating Fallback Agent.");
+                let fallback = get_fallback_agents(global_id_counter, 1, audience_criteria);
+                global_id_counter += 1;
+                agents.extend(fallback);
             }
         }
         
         agents
     }
 
-    // WRAPPER: Keeps the old function signature so other code doesn't break
     pub fn generate_batch(count: usize, criteria: &str, brain: &Arc<AgentBrain>) -> Vec<Agent> {
-        // Call the new engine with empty voices (Standard Mode)
         Self::generate_from_voices(count, criteria, Vec::new(), brain)
     }
 }
 
-// Robust JSON Extractor
+// --- UTILS ---
+
 fn clean_json_text(text: &str) -> String {
     let start = text.find('[').unwrap_or(0);
     let end = text.rfind(']').map(|i| i + 1).unwrap_or(text.len());
-    
     if start < end {
-        let slice = &text[start..end];
-        slice.replace("```json", "").replace("```", "").trim().to_string()
+        text[start..end].replace("```json", "").replace("```", "").trim().to_string()
     } else {
         text.to_string()
     }
 }
 
-// Updated fallback to respect 1-based indexing and needed count
 fn get_fallback_agents(start_id: u32, needed: usize, criteria: &str) -> Vec<Agent> {
     let mut fallbacks = Vec::new();
     for i in 0..needed {
         let id = start_id + i as u32;
         fallbacks.push(Agent {
             id,
-            name: format!("Agent {} (Fallback)", id),
+            name: format!("Participant {}", id),
             role: "General Consumer".to_string(),
             demographic: format!("Target: {}", criteria),
-            beliefs: vec![], 
-            spending_profile: "Moderate".to_string(), 
-            product_affinity: vec![], 
-            messaging_resonance: vec![], 
-            // NEW Defaults
-            speaking_style: "Neutral".to_string(),
-            skepticism_level: "Medium".to_string(),
-            simulated_responses: 0, 
-            avg_sentiment: 0.5,
+            beliefs: vec![], spending_profile: "Moderate".to_string(), 
+            product_affinity: vec![], messaging_resonance: vec![], 
+            speaking_style: "Neutral".to_string(), skepticism_level: "Medium".to_string(),
+            simulated_responses: 0, avg_sentiment: 0.5,
             memory: Arc::new(Mutex::new(MemoryStream::new())),
         });
     }

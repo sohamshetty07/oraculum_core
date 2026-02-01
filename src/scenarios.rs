@@ -1,7 +1,7 @@
 // src/scenarios.rs
 // ADVANCED MARKETING SIMULATION ENGINE
 // Implements Chain-of-Thought (CoT) & Phi-3 Chat Formats
-// UPGRADE: Contextual Tasking, Dynamic Personality & Memory Graph Injection
+// UPGRADE: Contextual Tasking, Dynamic Personality, Memory Graph Injection & Robust Parsing
 
 use crate::agent_swarm::Agent;
 
@@ -9,8 +9,41 @@ use crate::agent_swarm::Agent;
 /// Must be Sync + Send for parallel execution on M4 chips.
 pub trait Scenario: Sync + Send {
     fn name(&self) -> &str;
-    fn generate_prompt(&self, agent: &Agent, custom_context: Option<&str>) -> String;
     fn scenario_key(&self) -> &str;
+    fn generate_prompt(&self, agent: &Agent, custom_context: Option<&str>) -> String;
+    
+    // NEW: Robust Response Parser (Default Implementation)
+    // Extracts [Verdict] and [Thinking] tags to keep CSVs clean.
+    fn process_response(&self, raw: &str) -> (String, Option<String>) {
+        let raw_clean = raw.trim();
+        
+        if let Some(verdict_idx) = raw_clean.find("[Verdict]") {
+            // Extract the final spoken verdict
+            let verdict = raw_clean[verdict_idx + 9..].trim().to_string();
+            
+            // Extract the hidden thought process
+            let thought = if let Some(think_idx) = raw_clean.find("[Thinking]") {
+                let end_think = raw_clean.find("[Action]").unwrap_or(verdict_idx);
+                Some(raw_clean[think_idx + 10..end_think].trim().to_string())
+            } else {
+                None
+            };
+            
+            return (verdict, thought);
+        } else if let Some(action_idx) = raw_clean.find("[Action]") {
+            // For CX Flow scenarios that use [Action] instead of [Verdict]
+            let action = raw_clean[action_idx + 8..].trim().to_string();
+            let thought = if let Some(think_idx) = raw_clean.find("[Thinking]") {
+                Some(raw_clean[think_idx + 10..action_idx].trim().to_string())
+            } else {
+                None
+            };
+            return (action, thought);
+        }
+        
+        // Fallback: Return whole string if tags are missing (Graceful Fail)
+        (raw_clean.to_string(), None)
+    }
 }
 
 // =========================================================================
@@ -20,15 +53,15 @@ pub trait Scenario: Sync + Send {
 pub struct ProductLaunchScenario {
     pub product_name: String,
     pub category: String,
-    pub key_benefits: Vec<String>,
+    pub context_docs: Vec<String>, // Renamed from key_benefits to align with API
 }
 
 impl ProductLaunchScenario {
-    pub fn new(product_name: &str, category: &str, key_benefits: Vec<&str>) -> Self {
+    pub fn new(product_name: &str, category: &str, context_docs: Vec<&str>) -> Self {
         Self {
             product_name: product_name.to_string(),
             category: category.to_string(),
-            key_benefits: key_benefits.iter().map(|s| s.to_string()).collect(),
+            context_docs: context_docs.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -38,7 +71,7 @@ impl Scenario for ProductLaunchScenario {
     fn scenario_key(&self) -> &str { "product_launch" }
 
     fn generate_prompt(&self, agent: &Agent, _custom_context: Option<&str>) -> String {
-        let benefits = self.key_benefits.join(", ");
+        let full_context = self.context_docs.join("\n");
         
         // --- CONTEXTUAL TASKING LOGIC ---
         let (task_directive, tone_instruction) = match agent.skepticism_level.as_str() {
@@ -70,6 +103,7 @@ impl Scenario for ProductLaunchScenario {
             \
             {}\n\
             \
+            TASK: {}\n\
             INSTRUCTIONS:\n\
             1. [Thinking]: First, analyze if this fits your budget and daily routine. BE CRITICAL. {}\n\
             2. [Verdict]: Give your final answer. Would you buy it? (Yes/No/Maybe) and why. Use your defined speaking style ('{}').\n\
@@ -85,8 +119,10 @@ impl Scenario for ProductLaunchScenario {
             agent.demographic, 
             agent.speaking_style, agent.skepticism_level,
             agent.beliefs.join(", "),
-            self.product_name, // <--- MEMORY INJECTION: Triggers Graph Retrieval
-            self.category, self.product_name, benefits,
+            self.product_name, // Memory Injection Key
+            self.category, self.product_name, 
+            full_context, // Injected Specs/Reddit
+            full_context, // Fallback injection
             task_directive,
             tone_instruction,
             agent.speaking_style
@@ -99,17 +135,17 @@ impl Scenario for ProductLaunchScenario {
 // Goal: Determine Emotional Resonance & Clarity of Ad Copy
 // =========================================================================
 pub struct CreativeTestScenario {
-    pub tagline_a: String,
-    pub tagline_b: String,
+    pub tagline_a: String, // Kept for compatibility but usually parsed from product_context
     pub product_context: String,
+    pub campaign_goal: String,
 }
 
 impl CreativeTestScenario {
-    pub fn new(tagline_a: &str, tagline_b: &str, product_context: &str) -> Self {
+    pub fn new(product_name: &str, context: &str, goal: &str) -> Self {
         Self {
-            tagline_a: tagline_a.to_string(),
-            tagline_b: tagline_b.to_string(),
-            product_context: product_context.to_string(),
+            tagline_a: product_name.to_string(), // In this flow, we pass name as Tagline A usually
+            product_context: context.to_string(),
+            campaign_goal: goal.to_string(),
         }
     }
 }
@@ -127,26 +163,26 @@ impl Scenario for CreativeTestScenario {
             \
             We are A/B testing marketing copy for: {}.\n\
             \
-            OPTION A: \"{}\"\n\
-            OPTION B: \"{}\"\n\
+            CONTEXT:\n{}\n\
             \
-            TASK: Which headline captures your attention more? Consider your personal beliefs: {}.\n\
+            TASK: Which headline/concept captures your attention more? Consider your personal beliefs: {}.\n\
             \
             INSTRUCTIONS:\n\
-            1. [Thinking]: Compare both options. Which feels more authentic to you? Which feels 'salesy'?\n\
-            2. [Verdict]: State clearly which option wins and the main reason. Speak in your natural voice.\n\
+            1. [Thinking]: Compare the concept to your values. Which feels more authentic? Which feels 'salesy'?\n\
+            2. [Verdict]: State clearly if this resonates (High/Medium/Low) and why. Speak in your natural voice.\n\
             \
             MANDATORY RESPONSE FORMAT:\n\
             [Thinking]\n\
-            Option A sounds too corporate. Option B hits my pain point about time.\n\
+            This concept sounds too corporate. It doesn't hit my pain point about time.\n\
             [Verdict]\n\
-            Option B wins. It feels more honest.\n\
+            Low resonance. It feels fake.\n\
             \n\
             Response:<|end|>\n<|assistant|>",
             agent.name, agent.role, agent.demographic,
             agent.speaking_style, agent.skepticism_level,
-            self.product_context, // <--- MEMORY INJECTION
-            self.product_context, self.tagline_a, self.tagline_b,
+            self.campaign_goal, // Memory Injection
+            self.campaign_goal,
+            self.product_context,
             agent.beliefs.join(", ")
         )
     }
@@ -191,7 +227,7 @@ impl Scenario for CXFlowScenario {
             Topic: {} (CX Flow)\n\
             \
             SCENARIO: {}\n\
-            PRODUCT: {}\n\
+            PRODUCT CONTEXT: {}\n\
             \
             TASK: Be honest about your behavior. Do you click? Do you abandon cart? Do you recommend it?\n\
             \
@@ -208,7 +244,7 @@ impl Scenario for CXFlowScenario {
             Response:<|end|>\n<|assistant|>",
             agent.name, agent.role, agent.demographic,
             agent.speaking_style, agent.skepticism_level,
-            self.product_info, // <--- MEMORY INJECTION
+            self.stage, // Memory Injection
             stage_context,
             self.product_info,
             agent.spending_profile
@@ -221,17 +257,17 @@ impl Scenario for CXFlowScenario {
 // Goal: Test Value Propositions (Rational vs Emotional vs Social)
 // =========================================================================
 pub struct ABMessagingScenario {
-    pub value_prop_a: String,
-    pub value_prop_b: String,
     pub product_name: String,
+    pub context: String,
+    pub strategy_name: String, 
 }
 
 impl ABMessagingScenario {
-    pub fn new(value_prop_a: &str, value_prop_b: &str, product_name: &str) -> Self {
+    pub fn new(product_name: &str, context: &str, strategy_name: &str) -> Self {
         Self {
-            value_prop_a: value_prop_a.to_string(),
-            value_prop_b: value_prop_b.to_string(),
             product_name: product_name.to_string(),
+            context: context.to_string(),
+            strategy_name: strategy_name.to_string(),
         }
     }
 }
@@ -248,50 +284,29 @@ impl Scenario for ABMessagingScenario {
             Topic: {} (Messaging)\n\
             \
             Brand: {}\n\
-            We are trying to decide how to position this product to people like you.\n\
+            We are testing the positioning strategy: '{}'.\n\
             \
-            STRATEGY A: {}\n\
-            STRATEGY B: {}\n\
+            CONTEXT:\n{}\n\
             \
-            TASK: Which argument convinces you to switch from your current brand?\n\
+            TASK: Does this messaging convince you to switch from your current brand?\n\
             \
             INSTRUCTIONS:\n\
             1. [Thinking]: Evaluate which benefit matters more to you personally (e.g. price vs health vs status).\n\
-            2. [Verdict]: Choose Strategy A or B and rate persuasiveness (1-10). Use your voice.\n\
+            2. [Verdict]: Rate persuasiveness (1-10) and explain why. Use your voice.\n\
             \
             MANDATORY RESPONSE FORMAT:\n\
             [Thinking]\n\
-            Strategy A is boring. Strategy B appeals to my need for status.\n\
+            This appeals to my need for status, but ignores price.\n\
             [Verdict]\n\
-            Strategy B is a 9/10. It sounds premium.\n\
+            7/10. It sounds premium but expensive.\n\
             \n\
             Response:<|end|>\n<|assistant|>",
             agent.name, agent.role, agent.demographic,
             agent.speaking_style, agent.skepticism_level,
-            self.product_name, // <--- MEMORY INJECTION
+            self.product_name, // Memory Injection
             self.product_name,
-            self.value_prop_a,
-            self.value_prop_b
-        )
-    }
-}
-
-// =========================================================================
-// 5. PERSONA GENERATION (INTERNAL UTILITY)
-// Goal: Self-reflection for debugging
-// =========================================================================
-pub struct PersonaGenerationScenario;
-
-impl Scenario for PersonaGenerationScenario {
-    fn name(&self) -> &str { "Persona Generation" }
-    fn scenario_key(&self) -> &str { "persona_generation" }
-
-    fn generate_prompt(&self, agent: &Agent, _custom_context: Option<&str>) -> String {
-        format!(
-            "<|user|>You are {}. Role: {}. Location: {}.\n\
-            Please introduce yourself deeply. Talk about your daily routine, your financial stress levels, and your favorite places to shop.\n\
-            Format: Natural first-person speech.<|end|>\n<|assistant|>",
-            agent.name, agent.role, agent.demographic
+            self.strategy_name,
+            self.context
         )
     }
 }
@@ -310,19 +325,18 @@ pub fn get_scenario(scenario_type: &str) -> Option<Box<dyn Scenario>> {
         ))),
         "creative_test" => Some(Box::new(CreativeTestScenario::new(
             "Snack Smart, Live Better",
-            "Guilt-Free Indulgence, Maximum Flavor",
-            "New Mondelez Premium Line",
+            "Target Audience: Gen Z",
+            "Launch Campaign",
         ))),
         "cx_flow" => Some(Box::new(CXFlowScenario::new(
             "awareness",
             "New premium snacking line launched on Zepto",
         ))),
         "ab_messaging" => Some(Box::new(ABMessagingScenario::new(
-            "Affordable nutrition without compromise",
-            "Indulgent treats for the conscious consumer",
-            "MondeleezPlus",
+            "Mondelez Bites",
+            "Affordable vs Premium Positioning",
+            "Value Strategy",
         ))),
-        "persona_generation" => Some(Box::new(PersonaGenerationScenario)),
         _ => None,
     }
 }
@@ -333,6 +347,5 @@ pub fn list_available_scenarios() -> Vec<&'static str> {
         "creative_test",
         "cx_flow",
         "ab_messaging",
-        "persona_generation",
     ]
 }
