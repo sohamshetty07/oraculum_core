@@ -17,7 +17,7 @@ pub struct Agent {
     pub product_affinity: Vec<String>,
     pub messaging_resonance: Vec<String>,
     
-    // --- NEW FIELDS: Voice & Personality Engine ---
+    // --- Voice & Personality Engine ---
     pub speaking_style: String,   // e.g. "Casual", "Analytical", "Rant"
     pub skepticism_level: String, // e.g. "High", "Medium", "Low"
     // ----------------------------------------------
@@ -33,6 +33,8 @@ pub struct Agent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimulationResult {
     pub agent_id: u32,
+    // NEW: Explicit Name field for Blackboard Architecture
+    pub agent_name: Option<String>,
     pub agent_role: String,
     pub agent_demographic: String,
     pub scenario: String,
@@ -44,7 +46,8 @@ pub struct SimulationResult {
     pub thought_process: Option<String>, 
     
     pub sentiment: String,
-    pub category: String,
+    // Changed to Option to support flexible categories (e.g. Round 1 vs Intent)
+    pub category: Option<String>,
 }
 
 impl Agent {
@@ -139,7 +142,7 @@ impl Agent {
             product_affinity,
             messaging_resonance,
             
-            // --- NEW: Default Initialization for Fallback Agents ---
+            // --- Default Initialization for Fallback Agents ---
             speaking_style: "Neutral".to_string(),
             skepticism_level: "Medium".to_string(),
             // -----------------------------------------------------
@@ -223,48 +226,50 @@ impl AgentSwarm {
         }
     }
 
-    pub fn extract_category(response: &str, scenario: &str) -> String {
-        match scenario {
+    pub fn extract_category(response: &str, scenario: &str) -> Option<String> {
+        let category = match scenario {
             "product_launch" => {
                 if response.contains("buy") || response.contains("purchase") {
-                    "intent_to_buy".to_string()
+                    "intent_to_buy"
                 } else if response.contains("healthy") || response.contains("quality") {
-                    "quality_focused".to_string()
+                    "quality_focused"
                 } else if response.contains("price") || response.contains("cost") {
-                    "price_sensitive".to_string()
+                    "price_sensitive"
                 } else {
-                    "intrigued".to_string()
+                    "intrigued"
                 }
             }
             "creative_test" => {
                 if response.to_lowercase().contains("second") {
-                    "option_b_preference".to_string()
+                    "option_b_preference"
                 } else if response.to_lowercase().contains("first") {
-                    "option_a_preference".to_string()
+                    "option_a_preference"
                 } else {
-                    "unclear_preference".to_string()
+                    "unclear_preference"
                 }
             }
             "cx_flow" => {
                 if response.contains("buy") || response.contains("cart") {
-                    "converted".to_string()
+                    "converted"
                 } else if response.contains("consider") || response.contains("check") {
-                    "considering".to_string()
+                    "considering"
                 } else {
-                    "aware".to_string()
+                    "aware"
                 }
             }
             "ab_messaging" => {
                 if response.contains("affordable") || response.contains("value") {
-                    "value_resonance".to_string()
+                    "value_resonance"
                 } else if response.contains("premium") || response.contains("indulgent") {
-                    "premium_resonance".to_string()
+                    "premium_resonance"
                 } else {
-                    "neutral_resonance".to_string()
+                    "neutral_resonance"
                 }
             }
-            "persona_generation" => "persona_data".to_string(),
-            _ => "unknown".to_string(),
-        }
+            "persona_generation" => "persona_data",
+            _ => "general",
+        };
+        
+        Some(category.to_string())
     }
 }

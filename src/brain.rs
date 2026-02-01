@@ -13,7 +13,9 @@ struct InferenceRequest {
     max_tokens: usize,
     // 1. NEW FIELD: Optional Base64 Image string
     image: Option<String>, 
-    pdf: Option<String>, 
+    pdf: Option<String>,
+    // 2. NEW FIELD: Temperature control for creativity
+    temperature: f32, 
 }
 
 #[derive(Deserialize, Debug)]
@@ -76,8 +78,8 @@ impl AgentBrain {
         }
     }
 
-    // 2. UPDATED SIGNATURE: Now accepts optional image_b64
-    pub fn generate(&self, prompt: &str, max_tokens: usize, image_b64: Option<String>, pdf_b64: Option<String>) -> String {
+    // 2. UPDATED SIGNATURE: Now accepts optional image_b64 and temperature
+    pub fn generate(&self, prompt: &str, max_tokens: usize, image_b64: Option<String>, pdf_b64: Option<String>, temp: f32) -> String {
         let mut child = self.python_process.lock().unwrap();
         
         // Send Request
@@ -87,7 +89,8 @@ impl AgentBrain {
                 prompt: prompt.to_string(),
                 max_tokens,
                 image: image_b64, 
-                pdf: pdf_b64
+                pdf: pdf_b64,
+                temperature: temp, // Pass temperature to Python
             };
             let json_req = serde_json::to_string(&request).unwrap();
             

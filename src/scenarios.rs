@@ -14,27 +14,38 @@ pub trait Scenario: Sync + Send {
     
     // NEW: Robust Response Parser (Default Implementation)
     // Extracts [Verdict] and [Thinking] tags to keep CSVs clean.
+    // UPDATE: Now automatically strips hallucinated artifacts like "---" or "ROOM CONTEXT"
     fn process_response(&self, raw: &str) -> (String, Option<String>) {
         let raw_clean = raw.trim();
         
+        // Helper to clean artifacts
+        let clean = |text: &str| -> String {
+            text.replace("---", "")
+                .replace("ROOM CONTEXT", "")
+                .trim()
+                .to_string()
+        };
+        
         if let Some(verdict_idx) = raw_clean.find("[Verdict]") {
             // Extract the final spoken verdict
-            let verdict = raw_clean[verdict_idx + 9..].trim().to_string();
+            let verdict = clean(&raw_clean[verdict_idx + 9..]);
             
             // Extract the hidden thought process
+            // We strictly use the start of [Verdict] as the end of [Thinking]
             let thought = if let Some(think_idx) = raw_clean.find("[Thinking]") {
-                let end_think = raw_clean.find("[Action]").unwrap_or(verdict_idx);
-                Some(raw_clean[think_idx + 10..end_think].trim().to_string())
+                Some(clean(&raw_clean[think_idx + 10..verdict_idx]))
             } else {
                 None
             };
             
             return (verdict, thought);
+
         } else if let Some(action_idx) = raw_clean.find("[Action]") {
             // For CX Flow scenarios that use [Action] instead of [Verdict]
-            let action = raw_clean[action_idx + 8..].trim().to_string();
+            let action = clean(&raw_clean[action_idx + 8..]);
+
             let thought = if let Some(think_idx) = raw_clean.find("[Thinking]") {
-                Some(raw_clean[think_idx + 10..action_idx].trim().to_string())
+                Some(clean(&raw_clean[think_idx + 10..action_idx]))
             } else {
                 None
             };
@@ -42,7 +53,7 @@ pub trait Scenario: Sync + Send {
         }
         
         // Fallback: Return whole string if tags are missing (Graceful Fail)
-        (raw_clean.to_string(), None)
+        (clean(raw_clean), None)
     }
 }
 

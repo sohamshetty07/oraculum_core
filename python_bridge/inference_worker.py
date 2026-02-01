@@ -7,6 +7,7 @@ import base64
 import io
 import re
 import urllib.parse
+import hashlib  # Added missing import for PDF hashing
 import networkx as nx 
 import lancedb
 import requests
@@ -208,6 +209,8 @@ for line in sys.stdin:
         # TASK 3: INFERENCE
         prompt = req.get("prompt", "")
         max_tokens = req.get("max_tokens", 300)
+        # NEW: Read temperature (default 0.0 for deterministic, higher for creative)
+        temp = req.get("temperature", 0.0)
         
         # Metadata
         agent = "Unknown"
@@ -254,9 +257,11 @@ for line in sys.stdin:
             except: pass
 
         if images:
-             res = generate(model, processor, full_prompt, images, max_tokens=max_tokens, verbose=False)
+             # NEW: Passed temp for creative sampling
+             res = generate(model, processor, full_prompt, images, max_tokens=max_tokens, temp=temp, verbose=False)
         else:
-             res = generate(model, processor, full_prompt, max_tokens=max_tokens, verbose=False)
+             # NEW: Passed temp for creative sampling
+             res = generate(model, processor, full_prompt, max_tokens=max_tokens, temp=temp, verbose=False)
             
         final_text = res.text.split("<|end|>")[0].strip()
         _update_graph_memory(agent, final_text, topic)

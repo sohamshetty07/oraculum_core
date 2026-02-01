@@ -41,9 +41,9 @@ impl Reporter {
                 &result.prompt,
                 &result.response,
                 // Handle optional thought process safely
-                result.thought_process.as_deref().unwrap_or(""), 
+                result.thought_process.as_deref().unwrap_or(""),
                 &result.sentiment,
-                &result.category,
+                result.category.as_deref().unwrap_or(""),
             ])?;
         }
 

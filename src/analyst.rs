@@ -82,6 +82,6 @@ impl AnalystEngine {
 
         // 5. Generate
         println!("🧠 ANALYST: Generating report for scenario '{}'...", scenario_type);
-        brain.generate(&prompt, 1500, None, None)
+        brain.generate(&prompt, 1500, None, None, 0.4)
     }
 }

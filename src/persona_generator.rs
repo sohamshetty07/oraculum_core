@@ -57,20 +57,21 @@ impl PersonaGenerator {
             // If we don't guide the LLM, it defaults to the most probable average person.
             // We force it to look at different corners of the room for each batch.
             let archetype_instruction = match batch_idx % 4 {
-                0 => "FOCUS: Early Adopters & Optimists. Names should be modern.",
-                1 => "FOCUS: Skeptics & Budget-Conscious. Names should be traditional.",
-                2 => "FOCUS: Quality-Conscious & Brand Loyalists. Mix of names.",
-                _ => "FOCUS: Critics & Detractors. Diverse names."
+                0 => "FOCUS: Early Adopters & Optimists. Use modern, urban names.",
+                1 => "FOCUS: Skeptics & Budget-Conscious. Use traditional names.",
+                2 => "FOCUS: Quality-Conscious & Brand Loyalists. Use specific regional names (e.g. South Indian, Bengali).",
+                _ => "FOCUS: Critics & Detractors. Use diverse names."
             };
 
             // --- THE PROMPT ---
+            // UPDATED: Replaced negative constraints with positive regional instructions
             let prompt = format!(
                 "<|user|>Task: Generate a JSON array of {} unique Indian consumer personas matching: '{}'.\n\n\
                 {}\
                 \n\
                 DIVERSITY INSTRUCTION: {}\n\
                 CRITICAL RULES:\n\
-                1. NO REPEATED NAMES (e.g. Do not use Aryan or Rohan if possible, be creative).\n\
+                1. USE DIVERSE REGIONAL NAMES: Pick names from South India, Bengal, Punjab, Maharashtra, etc. Avoid generic names like Aryan or Rohan.\n\
                 2. VARY THE SKEPTICISM: Not everyone agrees.\n\
                 3. REALISM: Use the Source Material to define their 'speaking_style'.\n\
                 \n\
@@ -83,8 +84,9 @@ impl PersonaGenerator {
                 archetype_instruction
             );
 
-            // Call Python Brain
-            let response_text = brain.generate(&prompt, 1500, None, None); 
+            // Call Python Brain with HIGH TEMPERATURE (0.8)
+            // This forces diversity in names
+            let response_text = brain.generate(&prompt, 1500, None, None, 0.8); 
             let clean_json = clean_json_text(&response_text);
             
             // Parse & Build

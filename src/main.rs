@@ -91,32 +91,13 @@ pub fn run_simulation_parallel(
             
             // Ask the Brain (Python)
             // PASS IMAGE TO BRAIN: We clone the image data for each thread
-            let raw_response = brain.generate(&prompt, 800, image_data.clone(), pdf_data.clone());
+            // Updated Temp to 0.7 for creativity as discussed
+            let raw_response = brain.generate(&prompt, 800, image_data.clone(), pdf_data.clone(), 0.7);
             
-            // --- NEW: DUAL-LAYER PARSING ---
-            // We extract BOTH the hidden [Thinking] block AND the spoken [Verdict]
-            let (thought_process, response_text) = if let Some(verdict_start) = raw_response.find("[Verdict]") {
-                let verdict = raw_response[verdict_start + 9..].trim().to_string();
-                
-                // Try to capture thinking block if it exists
-                let thought = if let Some(think_start) = raw_response.find("[Thinking]") {
-                    // Extract text between [Thinking] and [Verdict]
-                    Some(raw_response[think_start + 10..verdict_start].trim().to_string())
-                } else {
-                    None
-                };
-                
-                (thought, verdict)
-            } else {
-                // Fallback: If formatting failed, just treat whole response as verdict
-                // But try to strip [Thinking] if it exists weirdly
-                let clean_text = if let Some(think_end) = raw_response.find("Thinking]") {
-                     raw_response[think_end + 9..].trim().to_string()
-                } else {
-                    raw_response.trim().to_string()
-                };
-                (None, clean_text)
-            };
+            // --- UPDATED PARSING ---
+            // Use Scenario's robust parser to handle [Thinking] and [Verdict] tags
+            // plus strip artifacts like "---"
+            let (response_text, thought_process) = scenario.process_response(&raw_response);
 
             // Analyze
             let sentiment = AgentSwarm::sentiment_from_response(&response_text);
@@ -125,13 +106,17 @@ pub fn run_simulation_parallel(
             // Return Result
             SimulationResult {
                 agent_id: agent.id,
-                agent_role: agent.role.clone(),
-                agent_demographic: agent.demographic.clone(),
+                // ADDED: Missing field required by new struct definition
+                agent_name: Some(agent.name.clone()),
+                // MAPPED: Name as Role for UI Header consistency (e.g., "Priya")
+                agent_role: agent.name.clone(),
+                // MAPPED: Role + Demo for UI Subheader (e.g., "Trader (Mumbai...)")
+                agent_demographic: format!("{} ({})", agent.role, agent.demographic),
                 scenario: scenario.scenario_key().to_string(),
                 timestamp: AgentSwarm::get_timestamp(),
                 prompt,
-                response: response_text, // <--- The Clean Spoken Verdict
-                thought_process,         // <--- The Hidden Cognitive Trace (for UI reveal)
+                response: response_text, 
+                thought_process,         
                 sentiment,
                 category,
             }
