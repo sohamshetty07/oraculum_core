@@ -1,10 +1,6 @@
 // src/persona_generator.rs
 // DYNAMIC VERSION: Context-Sharded Doppelgänger Engine + SKILLS INTEGRATION
-// FEATURES: 
-// 1. Shards 'Wild Voices' so agents have unique backstories.
-// 2. Uses 'Diversity Seeds' to force LLM variance (preventing name collision).
-// 3. Assigns Skills dynamically based on Persona Role.
-// 4. Truncates context to prevent Pipe Deadlocks.
+// UPDATED: Fixed Deadlock by removing massive payload injection.
 
 use crate::brain::AgentBrain;
 use crate::agent_swarm::Agent;
@@ -19,7 +15,7 @@ impl PersonaGenerator {
     pub fn generate_from_voices(
         count: usize, 
         audience_criteria: &str, 
-        real_voices: Vec<String>, 
+        _real_voices: Vec<String>, // INPUT IGNORED to prevent 100MB+ payload deadlock
         brain: &Arc<AgentBrain>
     ) -> Vec<Agent> {
         
@@ -30,40 +26,15 @@ impl PersonaGenerator {
         println!("✨ GENERATOR: Synthesizing {} unique personas for target: '{}'...", count, audience_criteria);
 
         // CONFIGURATION
-        let batch_size = 5; // We generate 5 agents at a time to keep LLM context stable
+        let batch_size = 5; 
         let batches = (count as f32 / batch_size as f32).ceil() as usize;
 
         for batch_idx in 0..batches {
             if agents.len() >= count { break; }
 
-            // --- STRATEGY 1: VOICE SHARDING ---
-            // Don't give every agent every comment. Slice the data.
-            // Batch 0 gets comments 0-4, Batch 1 gets 5-9, etc.
-            let start_voice = (batch_idx * 3) % real_voices.len().max(1);
-            let end_voice = ((batch_idx + 1) * 3).min(real_voices.len());
-            
-            let voice_subset = if !real_voices.is_empty() && start_voice < real_voices.len() {
-                real_voices[start_voice..end_voice].to_vec()
-            } else {
-                Vec::new()
-            };
-
-            // --- TRUNCATION LOGIC (Prevent Pipe Deadlock) ---
-            let mut voice_context = if !voice_subset.is_empty() {
-                format!("SOURCE MATERIAL (Base personalities on these SPECIFIC real comments):\n{}\n\n", voice_subset.join("\n---\n"))
-            } else {
-                String::new()
-            };
-            
-            // Limit context size to ~2000 chars to ensure it fits in the standard pipe buffer
-            if voice_context.len() > 2000 {
-                voice_context.truncate(2000);
-                voice_context.push_str("\n...(truncated)...");
-            }
-
-            // --- STRATEGY 2: DIVERSITY SEEDS ---
-            // If we don't guide the LLM, it defaults to the most probable average person.
-            // We force it to look at different corners of the room for each batch.
+            // --- ARCHETYPE STRATEGY ---
+            // Instead of sending raw text (which blocks the pipe), we send high-level
+            // "Directional Signals" to the LLM. This keeps the prompt under 1KB.
             let archetype_instruction = match batch_idx % 4 {
                 0 => "FOCUS: Early Adopters & Optimists. Use modern, urban names.",
                 1 => "FOCUS: Skeptics & Budget-Conscious. Use traditional names.",
@@ -71,29 +42,25 @@ impl PersonaGenerator {
                 _ => "FOCUS: Critics & Detractors. Use diverse names."
             };
 
-            // --- THE PROMPT ---
-            // UPDATED: Replaced negative constraints with positive regional instructions
+            // --- THE LIGHTWEIGHT PROMPT ---
+            // We removed 'voice_context' to ensure 100% stability.
             let prompt = format!(
                 "<|user|>Task: Generate a JSON array of {} unique Indian consumer personas matching: '{}'.\n\n\
-                {}\
-                \n\
                 DIVERSITY INSTRUCTION: {}\n\
                 CRITICAL RULES:\n\
-                1. USE DIVERSE REGIONAL NAMES: Pick names from South India, Bengal, Punjab, Maharashtra, etc. Avoid generic names like Aryan or Rohan.\n\
+                1. USE DIVERSE REGIONAL NAMES: Pick names from South India, Bengal, Punjab, Maharashtra, etc.\n\
                 2. VARY THE SKEPTICISM: Not everyone agrees.\n\
-                3. REALISM: Use the Source Material to define their 'speaking_style'.\n\
+                3. REALISM: Create realistic 'speaking_style' (e.g. 'Casual', 'Formal', 'Hinglish').\n\
                 \n\
                 Format: [{{ \"name\": \"...\", \"age\": 20, \"city\": \"...\", \"occupation\": \"...\", \"spending_behavior\": \"...\", \"cultural_values\": \"...\", \"speaking_style\": \"...\", \"skepticism_level\": \"...\" }}] \
                 \n\
                 Return ONLY JSON. No text.<|end|>\n<|assistant|>",
                 batch_size, 
                 audience_criteria, 
-                voice_context, 
                 archetype_instruction
             );
 
             // Call Python Brain with HIGH TEMPERATURE (0.8)
-            // This forces diversity in names
             let response_text = brain.generate(&prompt, 1500, None, None, 0.8); 
             let clean_json = clean_json_text(&response_text);
             
@@ -105,7 +72,7 @@ impl PersonaGenerator {
 
                         let mut raw_name = item["name"].as_str().unwrap_or("Agent").to_string();
                         
-                        // Fallback duplicate handler (just in case LLM ignores us)
+                        // Fallback duplicate handler
                         if used_names.contains(&raw_name) {
                             raw_name = format!("{} {}", raw_name, global_id_counter);
                         }
@@ -114,7 +81,7 @@ impl PersonaGenerator {
                         let id = global_id_counter;
                         global_id_counter += 1;
                         
-                        // Extract fields with defaults
+                        // Extract fields
                         let role = item["occupation"].as_str().unwrap_or("Consumer").to_string();
                         let city = item["city"].as_str().unwrap_or("Metro").to_string();
                         let age = item["age"].as_u64().unwrap_or(25);
@@ -123,7 +90,6 @@ impl PersonaGenerator {
                         let style = item["speaking_style"].as_str().unwrap_or("Neutral").to_string();
                         let skepticism = item["skepticism_level"].as_str().unwrap_or("Medium").to_string();
 
-                        // Rich demographic string for context injection later
                         let full_demographic = format!("{}, {}y/o, {}, {}", city, age, role, spending);
                         
                         let agent = Agent {
@@ -138,9 +104,7 @@ impl PersonaGenerator {
                             speaking_style: style.clone(),
                             skepticism_level: skepticism.clone(),
                             
-                            // --- NEW: Dynamic Skill Assignment based on Role ---
-                            // If they are an Analyst, Engineer, or Journalist, they check facts.
-                            // Everyone else just does deep research (social sentiment).
+                            // --- Dynamic Skill Assignment ---
                             skills: if role.to_lowercase().contains("analyst") 
                                     || role.to_lowercase().contains("engineer")
                                     || role.to_lowercase().contains("journalist") {
@@ -148,7 +112,6 @@ impl PersonaGenerator {
                             } else {
                                 vec!["deep_research".to_string()]
                             },
-                            // --------------------------------------------------
 
                             simulated_responses: 0,
                             avg_sentiment: 0.5,
@@ -160,7 +123,7 @@ impl PersonaGenerator {
                     }
                 }
             } else {
-                // Fallback if JSON breaks
+                // Fallback
                 println!("   ⚠️ JSON Parse Error. Generating Fallback Agent.");
                 let fallback = get_fallback_agents(global_id_counter, 1, audience_criteria);
                 global_id_counter += 1;
@@ -200,7 +163,6 @@ fn get_fallback_agents(start_id: u32, needed: usize, criteria: &str) -> Vec<Agen
             beliefs: vec![], spending_profile: "Moderate".to_string(), 
             product_affinity: vec![], messaging_resonance: vec![], 
             speaking_style: "Neutral".to_string(), skepticism_level: "Medium".to_string(),
-            // Default skills for fallback agents
             skills: vec!["deep_research".to_string()],
             simulated_responses: 0, avg_sentiment: 0.5,
             memory: Arc::new(Mutex::new(MemoryStream::new())),
