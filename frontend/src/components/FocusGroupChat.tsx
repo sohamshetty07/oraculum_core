@@ -97,8 +97,7 @@ export default function FocusGroupChat({ agents }: FocusGroupChatProps) {
         <AnimatePresence mode="popLayout">
           {agents.map((msg, index) => {
             // --- CRITICAL FIX: COMPOSITE KEY GENERATION ---
-            // If msg.agent_id is "1", and this agent speaks twice, using just "1" as key crashes React.
-            // We MUST combine ID + Index to ensure every chat bubble has a unique DOM identity.
+            // Combine ID + Index to ensure every chat bubble has a unique DOM identity.
             const rawId = msg.agent_id || msg.id || "unknown";
             const uniqueKey = `${rawId}-${index}`; 
 
@@ -113,7 +112,7 @@ export default function FocusGroupChat({ agents }: FocusGroupChatProps) {
 
             return (
               <motion.div
-                key={uniqueKey} // <--- USING COMPOSITE KEY
+                key={uniqueKey} 
                 initial={{ opacity: 0, y: 20, scale: 0.98 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 layout
@@ -177,7 +176,6 @@ export default function FocusGroupChat({ agents }: FocusGroupChatProps) {
                                 className="overflow-hidden"
                             >
                                 <div className="p-4 bg-slate-900 rounded-lg border border-slate-700 shadow-inner relative overflow-hidden">
-                                    {/* Matrix Rain Effect Hint */}
                                     <div className="absolute top-0 right-0 p-2 opacity-20">
                                         <BrainCircuit className="w-12 h-12 text-indigo-500" />
                                     </div>

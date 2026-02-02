@@ -1,5 +1,6 @@
 # python_bridge/inference_worker.py
-# SYSTEM V4: FEDERATED TRIAD & ROBUST CONTEXT SHARDING
+# SYSTEM V4.1: HYBRID BRAIN (Local RAG + Live Fallback + Context Sharding)
+# UPDATED: Fixed Deadlock using readline() instead of iterator
 
 import sys
 import json
@@ -7,19 +8,21 @@ import base64
 import io
 import re
 import urllib.parse
-import hashlib  # Added missing import for PDF hashing
+import hashlib
 import networkx as nx 
 import lancedb
 import requests
+import datetime
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from mlx_vlm import load, generate
 from PIL import Image
+from duckduckgo_search import DDGS 
 
 # --- CONFIGURATION ---
 MODEL_PATH = "mlx-community/Phi-3.5-vision-instruct-4bit"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2" 
-DB_PATH = "./data/lancedb_store"
+DB_PATH = "./knowledge_db" 
 USER_AGENT = 'OraculumMarketBot/1.0 (Student Project)'
 
 # --- GLOBAL MEMORY STATE ---
@@ -31,8 +34,19 @@ print(json.dumps({"status": "loading_models"}), flush=True)
 try:
     model, processor = load(MODEL_PATH, trust_remote_code=True)
     embed_model = SentenceTransformer(EMBEDDING_MODEL)
+    
+    # Initialize DB and try to load the Indian Context table
     db = lancedb.connect(DB_PATH)
-    print(json.dumps({"status": "ready"}), flush=True)
+    
+    # Handle deprecation warning gracefully while checking for table
+    existing_tables = db.table_names()
+    if "memory_bank" in existing_tables:
+        knowledge_table = db.open_table("memory_bank")
+        print(json.dumps({"status": "ready", "memory": "loaded"}), flush=True)
+    else:
+        knowledge_table = None
+        print(json.dumps({"status": "ready", "memory": "empty_waiting_for_input"}), flush=True)
+
 except Exception as e:
     print(json.dumps({"status": "error", "message": f"Startup Error: {str(e)}"}), flush=True)
     sys.exit(1)
@@ -52,11 +66,11 @@ def clean_query_step(query):
         if len(tokens) > 1: query = " ".join(tokens[:-1])
     return query
 
-# --- TOOL 1: FEDERATED RESEARCH (Voices + Context) ---
+# --- TOOL 1: FEDERATED RESEARCH (Legacy API - Voices + Context) ---
 def perform_federated_research(topic, audience_context):
     """
-    Queries Reddit (Voices) and Wikipedia (Context).
-    Uses query relaxation if direct hits fail.
+    Queries Reddit (Voices) and Wikipedia (Context) via direct API calls.
+    Kept for legacy compatibility and backup.
     """
     voices = []
     
@@ -103,7 +117,7 @@ def perform_federated_research(topic, audience_context):
     
     return list(set(voices))[:15]
 
-# --- TOOL 2: FACT CHECK (OpenFoodFacts + Wiki) ---
+# --- TOOL 2: FACT CHECK (OpenFoodFacts) ---
 def perform_fact_check(query):
     """
     Queries OpenFoodFacts for FMCG specs.
@@ -151,14 +165,9 @@ def get_sharded_context(agent_name, topic):
     if not all_opinions: return ""
 
     # SHARDING LOGIC
-    # Agent 'Aryan' -> hash -> index 0
-    # Agent 'Rohan' -> hash -> index 1
     shard_index = sum(ord(c) for c in agent_name) % 3
-    
     shard_size = max(1, len(all_opinions) // 2)
     start = (shard_index * shard_size) % len(all_opinions)
-    
-    # Return a slice of opinions, not all of them
     selected = all_opinions[start : start + 3]
     
     return "\n[WHAT OTHERS ARE SAYING - YOUR FEED]:\n" + "\n".join(selected) + "\n"
@@ -186,87 +195,145 @@ def _update_graph_memory(agent_name, response_text, topic):
         memory_graph.add_edge(agent_name, topic, relation="has_opinion", weight=sentiment, content=response_text[:120])
     except: pass 
 
-# --- MAIN LOOP ---
-for line in sys.stdin:
-    if not line: break
+# --- MAIN LOOP (UPDATED: Non-Blocking Read) ---
+while True:
     try:
+        # UPDATED: Use readline() instead of iterator to avoid buffering deadlocks
+        line = sys.stdin.readline()
+        if not line: break # EOF
+        
+        line = line.strip()
+        if not line: continue 
+        
         req = json.loads(line)
+        task = req.get("task")
         
         # === COMMAND ROUTER ===
+
+        # --- NEW TASK: QUERY MEMORY (RAG + Live Fallback) ---
+        if task == "query_memory":
+            query = req.get("query", "")
+            results = []
+            
+            # 1. Try Offline DB First (The 50k Reddit Records)
+            if knowledge_table:
+                try:
+                    q_vec = embed_model.encode([query])[0]
+                    # Search for top 5 closest semantic matches
+                    hits = knowledge_table.search(q_vec).limit(5).to_list()
+                    if hits:
+                        results = [h["text"] for h in hits]
+                except Exception as e:
+                    # Proceed to fallback if DB error
+                    pass
+            
+            # 2. Live Fallback (Self-Healing Memory)
+            # If local DB had no results (empty list), we search the live web
+            if not results:
+                try:
+                    with DDGS() as ddgs:
+                        # Search specifically for reviews/discussions
+                        web_hits = list(ddgs.text(f"{query} review india", max_results=4))
+                        
+                        new_data = []
+                        for hit in web_hits:
+                            text = f"[LIVE WEB] {hit['title']}: {hit['body']}"
+                            results.append(text)
+                            
+                            # 3. Save to Brain (Future agents will see this instantly)
+                            if knowledge_table:
+                                new_data.append({
+                                    "text": text,
+                                    "source": "live_ddg",
+                                    "category": "live_fallback",
+                                    "score": 10,
+                                    "date": datetime.datetime.now().isoformat(),
+                                    "vector": embed_model.encode([text])[0]
+                                })
+                        
+                        if new_data and knowledge_table:
+                            knowledge_table.add(new_data)
+                except Exception as e:
+                    results.append(f"Web Search Failed: {str(e)}")
+
+            print(json.dumps({"status": "success", "data": results}), flush=True)
+            continue
         
-        # TASK 1: RESEARCH (Federated)
-        if req.get("task") == "research":
+        # TASK 1: RESEARCH (Federated Legacy)
+        if task == "research":
             voices = perform_federated_research(req.get("product"), req.get("context"))
             print(json.dumps({"status": "success", "research_data": voices}), flush=True)
             continue
 
         # TASK 2: FACT CHECK (Open DBs)
-        if req.get("task") == "get_facts":
+        if task == "get_facts":
             fact = perform_fact_check(req.get("query"))
             print(json.dumps({"status": "success", "fact_sheet": fact}), flush=True)
             continue
 
         # TASK 3: INFERENCE
-        prompt = req.get("prompt", "")
-        max_tokens = req.get("max_tokens", 300)
-        # NEW: Read temperature (default 0.0 for deterministic, higher for creative)
-        temp = req.get("temperature", 0.0)
-        
-        # Metadata
-        agent = "Unknown"
-        topic = "General"
-        if "Name:" in prompt: agent = prompt.split("Name:")[1].split("\n")[0].strip()
-        if "Topic:" in prompt: topic = prompt.split("Topic:")[1].split("\n")[0].strip()
-
-        # Context Assembly (Sharded)
-        sharded_ctx = get_sharded_context(agent, topic)
-        
-        # RAG (PDFs)
-        rag_ctx = ""
-        if req.get("pdf"):
-            pdf_hash = hashlib.md5(req.get("pdf").encode()).hexdigest()
-            table_name = f"doc_{pdf_hash}"
-            if table_name not in db.list_tables():
-                chunks = process_pdf(req.get("pdf"))
-                if chunks:
-                    vecs = embed_model.encode(chunks)
-                    data = [{"vector": v, "text": t} for v, t in zip(vecs, chunks)]
-                    db.create_table(table_name, data=data)
+        if task == "generate":
+            prompt = req.get("prompt", "")
+            max_tokens = req.get("max_tokens", 300)
+            temp = req.get("temperature", 0.0)
             
-            tbl = db.open_table(table_name)
-            q_vec = embed_model.encode([prompt])[0]
-            res = tbl.search(q_vec).limit(2).to_pandas()
-            for _, r in res.iterrows(): rag_ctx += f"- {r['text'][:200]}...\n"
+            # Metadata
+            agent = "Unknown"
+            topic = "General"
+            if "Name:" in prompt: agent = prompt.split("Name:")[1].split("\n")[0].strip()
+            if "Topic:" in prompt: topic = prompt.split("Topic:")[1].split("\n")[0].strip()
 
-        # Final Prompt Injection
-        final_context = f"{rag_ctx}\n{sharded_ctx}"
-        
-        if "<|user|>" in prompt:
-            full_prompt = prompt.replace("<|user|>", f"<|user|>\n{final_context}\n", 1) + "<|end|>\n<|assistant|>"
-        else:
-            full_prompt = f"<|user|>\n{final_context}\n{prompt}<|end|>\n<|assistant|>"
-
-        # Generate
-        images = None
-        if req.get("image"):
-            try:
-                img = Image.open(io.BytesIO(base64.b64decode(req.get("image"))))
-                images = [img]
-                if "<|image_1|>" not in full_prompt:
-                     full_prompt = full_prompt.replace("<|user|>", "<|user|>\n<|image_1|>", 1)
-            except: pass
-
-        if images:
-             # NEW: Passed temp for creative sampling
-             res = generate(model, processor, full_prompt, images, max_tokens=max_tokens, temp=temp, verbose=False)
-        else:
-             # NEW: Passed temp for creative sampling
-             res = generate(model, processor, full_prompt, max_tokens=max_tokens, temp=temp, verbose=False)
+            # Context Assembly (Sharded)
+            sharded_ctx = get_sharded_context(agent, topic)
             
-        final_text = res.text.split("<|end|>")[0].strip()
-        _update_graph_memory(agent, final_text, topic)
-        
-        print(json.dumps({"status": "success", "text": final_text}), flush=True)
+            # RAG (PDFs)
+            rag_ctx = ""
+            if req.get("pdf"):
+                pdf_hash = hashlib.md5(req.get("pdf").encode()).hexdigest()
+                table_name = f"doc_{pdf_hash}"
+                
+                # Check if table exists (Using list_tables logic implicit in lancedb)
+                if table_name not in db.table_names():
+                    chunks = process_pdf(req.get("pdf"))
+                    if chunks:
+                        vecs = embed_model.encode(chunks)
+                        data = [{"vector": v, "text": t} for v, t in zip(vecs, chunks)]
+                        db.create_table(table_name, data=data)
+                
+                tbl = db.open_table(table_name)
+                q_vec = embed_model.encode([prompt])[0]
+                res = tbl.search(q_vec).limit(2).to_pandas()
+                for _, r in res.iterrows(): rag_ctx += f"- {r['text'][:200]}...\n"
+
+            # Final Prompt Injection
+            final_context = f"{rag_ctx}\n{sharded_ctx}"
+            
+            if "<|user|>" in prompt:
+                full_prompt = prompt.replace("<|user|>", f"<|user|>\n{final_context}\n", 1) + "<|end|>\n<|assistant|>"
+            else:
+                full_prompt = f"<|user|>\n{final_context}\n{prompt}<|end|>\n<|assistant|>"
+
+            # Generate
+            images = None
+            if req.get("image"):
+                try:
+                    img = Image.open(io.BytesIO(base64.b64decode(req.get("image"))))
+                    images = [img]
+                    if "<|image_1|>" not in full_prompt:
+                        full_prompt = full_prompt.replace("<|user|>", "<|user|>\n<|image_1|>", 1)
+                except: pass
+
+            if images:
+                res = generate(model, processor, full_prompt, images, max_tokens=max_tokens, temp=temp, verbose=False)
+            else:
+                res = generate(model, processor, full_prompt, max_tokens=max_tokens, temp=temp, verbose=False)
+                
+            final_text = res.text.split("<|end|>")[0].strip()
+            _update_graph_memory(agent, final_text, topic)
+            
+            print(json.dumps({"status": "success", "text": final_text}), flush=True)
+            # Force cleanup to keep memory sane
+            continue
 
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), flush=True)

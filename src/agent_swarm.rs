@@ -1,5 +1,5 @@
+// src/agent_swarm.rs
 // Agent Swarm Engine - Headless Marketing Intelligence
-// Place this in: src/agent_swarm.rs
 
 use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
@@ -20,7 +20,11 @@ pub struct Agent {
     // --- Voice & Personality Engine ---
     pub speaking_style: String,   // e.g. "Casual", "Analytical", "Rant"
     pub skepticism_level: String, // e.g. "High", "Medium", "Low"
-    // ----------------------------------------------
+    
+    // --- NEW: Cognitive Skills ---
+    // List of Skill IDs this agent can access (e.g., ["deep_research", "fact_check"])
+    pub skills: Vec<String>, 
+    // -----------------------------
 
     pub simulated_responses: u32,
     pub avg_sentiment: f32,
@@ -33,7 +37,7 @@ pub struct Agent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SimulationResult {
     pub agent_id: u32,
-    // NEW: Explicit Name field for Blackboard Architecture
+    // Explicit Name field for Blackboard Architecture
     pub agent_name: Option<String>,
     pub agent_role: String,
     pub agent_demographic: String,
@@ -45,14 +49,21 @@ pub struct SimulationResult {
     // Stores the hidden [Thinking] block
     pub thought_process: Option<String>, 
     
+    // --- NEW: Source Attribution ---
+    // Stores the "Acquired Knowledge" (e.g., "Found 5 Reddit posts...")
+    // This enables the "Glass Box" UI where users see the evidence.
+    pub sources: Option<String>,
+    // -------------------------------
+    
     pub sentiment: String,
-    // Changed to Option to support flexible categories (e.g. Round 1 vs Intent)
+    // Changed to Option to support flexible categories
     pub category: Option<String>,
 }
 
 impl Agent {
-    // This static constructor is a fallback. 
-    // The primary agents are now created dynamically by persona_generator.rs
+    // This static constructor is a FALLBACK only. 
+    // In the active simulation, agents are created dynamically by 'PersonaGenerator'
+    // using LLM tokens and live data, completely bypassing these hardcoded values.
     pub fn new(id: u32, role: &str) -> Self {
         let names = match role {
             "Trader" => vec!["Priya", "Amit", "Neha", "Rajesh", "Deepika"],
@@ -145,7 +156,10 @@ impl Agent {
             // --- Default Initialization for Fallback Agents ---
             speaking_style: "Neutral".to_string(),
             skepticism_level: "Medium".to_string(),
-            // -----------------------------------------------------
+            
+            // --- NEW: Initialize Default Skills ---
+            skills: vec!["deep_research".to_string(), "fact_check".to_string()],
+            // -------------------------------------
 
             simulated_responses: 0,
             avg_sentiment: 0.5,
@@ -156,6 +170,11 @@ impl Agent {
     pub fn update_sentiment(&mut self, sentiment_score: f32, response_count: u32) {
         self.simulated_responses = response_count;
         self.avg_sentiment = sentiment_score;
+    }
+
+    // Helper to check if agent has a skill
+    pub fn has_skill(&self, skill_id: &str) -> bool {
+        self.skills.contains(&skill_id.to_string())
     }
 }
 

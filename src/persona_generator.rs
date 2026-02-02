@@ -1,9 +1,10 @@
 // src/persona_generator.rs
-// DYNAMIC VERSION: Context-Sharded Doppelgänger Engine
+// DYNAMIC VERSION: Context-Sharded Doppelgänger Engine + SKILLS INTEGRATION
 // FEATURES: 
 // 1. Shards 'Wild Voices' so agents have unique backstories.
 // 2. Uses 'Diversity Seeds' to force LLM variance (preventing name collision).
-// 3. No Hardcoded Names.
+// 3. Assigns Skills dynamically based on Persona Role.
+// 4. Truncates context to prevent Pipe Deadlocks.
 
 use crate::brain::AgentBrain;
 use crate::agent_swarm::Agent;
@@ -47,11 +48,18 @@ impl PersonaGenerator {
                 Vec::new()
             };
 
-            let voice_context = if !voice_subset.is_empty() {
+            // --- TRUNCATION LOGIC (Prevent Pipe Deadlock) ---
+            let mut voice_context = if !voice_subset.is_empty() {
                 format!("SOURCE MATERIAL (Base personalities on these SPECIFIC real comments):\n{}\n\n", voice_subset.join("\n---\n"))
             } else {
                 String::new()
             };
+            
+            // Limit context size to ~2000 chars to ensure it fits in the standard pipe buffer
+            if voice_context.len() > 2000 {
+                voice_context.truncate(2000);
+                voice_context.push_str("\n...(truncated)...");
+            }
 
             // --- STRATEGY 2: DIVERSITY SEEDS ---
             // If we don't guide the LLM, it defaults to the most probable average person.
@@ -129,6 +137,19 @@ impl PersonaGenerator {
                             messaging_resonance: vec![],
                             speaking_style: style.clone(),
                             skepticism_level: skepticism.clone(),
+                            
+                            // --- NEW: Dynamic Skill Assignment based on Role ---
+                            // If they are an Analyst, Engineer, or Journalist, they check facts.
+                            // Everyone else just does deep research (social sentiment).
+                            skills: if role.to_lowercase().contains("analyst") 
+                                    || role.to_lowercase().contains("engineer")
+                                    || role.to_lowercase().contains("journalist") {
+                                vec!["deep_research".to_string(), "fact_check".to_string()]
+                            } else {
+                                vec!["deep_research".to_string()]
+                            },
+                            // --------------------------------------------------
+
                             simulated_responses: 0,
                             avg_sentiment: 0.5,
                             memory: Arc::new(Mutex::new(MemoryStream::new())), 
@@ -179,6 +200,8 @@ fn get_fallback_agents(start_id: u32, needed: usize, criteria: &str) -> Vec<Agen
             beliefs: vec![], spending_profile: "Moderate".to_string(), 
             product_affinity: vec![], messaging_resonance: vec![], 
             speaking_style: "Neutral".to_string(), skepticism_level: "Medium".to_string(),
+            // Default skills for fallback agents
+            skills: vec!["deep_research".to_string()],
             simulated_responses: 0, avg_sentiment: 0.5,
             memory: Arc::new(Mutex::new(MemoryStream::new())),
         });

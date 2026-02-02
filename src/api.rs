@@ -1,4 +1,7 @@
 // src/api.rs
+// ORACULUM CORE - API HANDLER
+// Orchestrates the Simulation, Memory Priming, and Execution.
+
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -7,7 +10,7 @@ use crate::AppState;
 use crate::agent_swarm::{Agent, SimulationResult, AgentSwarm};
 use crate::scenarios::Scenario; 
 use crate::persona_generator::PersonaGenerator;
-use crate::focus_group::FocusGroupSession; // Use the new Async Session
+use crate::focus_group::FocusGroupSession; 
 use crate::analyst::AnalystEngine;
 use std::thread;
 
@@ -88,6 +91,13 @@ pub async fn start_simulation(
         println!("🕵️ SCOUT: Initiating Federated Research (Reddit + Wiki)...");
         let research_data = brain.research(&req_product, &req_context);
         
+        // --- STEP 0.5: MEMORY PRIMING (The "Self-Healing" Trigger) ---
+        // We query the new memory system once here.
+        // If the topic is new, the Python worker will go online, fetch data, and save it to LanceDB.
+        // This ensures that when the 25 agents run in parallel later, they hit the Local Cache, not the Web.
+        println!("🧠 MEMORY: Priming Cognitive Graph for '{}'...", req_product);
+        let _ = brain.query_memory(&req_product); 
+
         println!("📦 SCOUT: Fetching Product Specifications...");
         let fact_sheet = brain.get_facts(&req_product);
 
@@ -148,7 +158,7 @@ pub async fn start_simulation(
             }
 
         } else {
-            // --- STANDARD PARALLEL MODE ---
+            // --- STANDARD PARALLEL MODE (Now with Skills) ---
             let scenario: Box<dyn Scenario> = match req_scenario.as_str() {
                 "creative_test" => Box::new(crate::scenarios::CreativeTestScenario::new(
                     &req_product, 
@@ -171,7 +181,9 @@ pub async fn start_simulation(
                 )),
             };
 
-            crate::run_simulation_parallel(&brain, &swarm, &scenario, req_image, req_pdf);
+            // Call the updated main logic
+            // We pass 'req_product' as the context string so agents know what to query in the DB
+            crate::run_simulation_parallel(&brain, &swarm, &scenario, req_image, req_pdf, req_product.clone());
         }
         
         // 5. Complete Job

@@ -1,6 +1,7 @@
 // src/brain.rs
 // ORACULUM CORE - NEURAL ENGINE BRIDGE
 // Connects Rust logic to Python's GPU-accelerated inference process
+// UPDATED: Robust Pipe Communication (No Deadlocks)
 
 use std::process::{Command, Stdio, Child};
 use std::io::{Write, BufReader, BufRead};
@@ -11,10 +12,8 @@ use serde::{Deserialize, Serialize};
 struct InferenceRequest {
     prompt: String,
     max_tokens: usize,
-    // 1. NEW FIELD: Optional Base64 Image string
     image: Option<String>, 
     pdf: Option<String>,
-    // 2. NEW FIELD: Temperature control for creativity
     temperature: f32, 
 }
 
@@ -54,10 +53,16 @@ impl AgentBrain {
                     Ok(0) => panic!("❌ Python process closed unexpectedly during startup."),
                     Ok(_) => {
                         let trimmed = line.trim();
+                        if trimmed.is_empty() { continue; }
+                        
                         if let Ok(status) = serde_json::from_str::<serde_json::Value>(trimmed) {
                              if let Some(s) = status.get("status").and_then(|v| v.as_str()) {
                                  if s == "ready" {
-                                     println!("✅ BRAIN: Neural Engine Online (M4 GPU Active)");
+                                     if let Some(mem) = status.get("memory").and_then(|v| v.as_str()) {
+                                         println!("✅ BRAIN: Neural Engine Online (M4 GPU Active) | Memory: {}", mem);
+                                     } else {
+                                         println!("✅ BRAIN: Neural Engine Online (M4 GPU Active)");
+                                     }
                                      break;
                                  } else if s.contains("loading") {
                                      continue;
@@ -78,166 +83,163 @@ impl AgentBrain {
         }
     }
 
-    // 2. UPDATED SIGNATURE: Now accepts optional image_b64 and temperature
-    pub fn generate(&self, prompt: &str, max_tokens: usize, image_b64: Option<String>, pdf_b64: Option<String>, temp: f32) -> String {
+    // --- CRITICAL HELPER: Safe Send & Receive ---
+    fn send_command<T: Serialize, R: for<'de> Deserialize<'de>>(&self, request: &T) -> Result<R, String> {
         let mut child = self.python_process.lock().unwrap();
         
-        // Send Request
-        {
-            let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-            let request = InferenceRequest {
-                prompt: prompt.to_string(),
-                max_tokens,
-                image: image_b64, 
-                pdf: pdf_b64,
-                temperature: temp, // Pass temperature to Python
-            };
-            let json_req = serde_json::to_string(&request).unwrap();
-            
-            if let Err(e) = writeln!(stdin, "{}", json_req) {
-                return format!("Error writing to Python: {}", e);
-            }
-        }
-
-        // Read Response
-        let stdout = child.stdout.as_mut().expect("Failed to open stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
+        // 1. Serialize
+        // We replace any raw newlines in the JSON string itself to prevent the pipe reader 
+        // in Python from thinking the message ended early.
+        let mut json_req = serde_json::to_string(request).map_err(|e| e.to_string())?;
         
-        if let Err(e) = reader.read_line(&mut line) {
-             return format!("Error reading from Python: {}", e);
+        // SANITIZATION: Remove internal newlines if any exist (though serde usually handles this)
+        // This is a safety net.
+        if json_req.contains('\n') {
+             json_req = json_req.replace('\n', " "); 
         }
 
-        if line.is_empty() {
-             return "Error: Empty response from Neural Engine".to_string();
-        }
-
-        let response: InferenceResponse = serde_json::from_str(&line).unwrap_or_else(|_| {
-            InferenceResponse {
-                status: "error".to_string(),
-                text: Some(format!("Error parsing JSON: {}", line)),
-                message: None,
+        if let Some(stdin) = child.stdin.as_mut() {
+            // Write payload
+            if let Err(e) = stdin.write_all(json_req.as_bytes()) {
+                return Err(format!("Failed to write to stdin: {}", e));
             }
-        });
-
-        if response.status == "success" {
-            response.text.unwrap_or_default()
+            // Write Delimiter
+            if let Err(e) = stdin.write_all(b"\n") {
+                return Err(format!("Failed to write newline: {}", e));
+            }
+            // CRITICAL: Force flush to ensure Python sees it immediately
+            if let Err(e) = stdin.flush() {
+                return Err(format!("Failed to flush stdin: {}", e));
+            }
         } else {
-            response.message.unwrap_or_else(|| "Unknown error".to_string())
+            return Err("Failed to open stdin".to_string());
+        }
+
+        // 2. Read Response
+        if let Some(stdout) = child.stdout.as_mut() {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            
+            if let Err(e) = reader.read_line(&mut line) {
+                return Err(format!("Failed to read from stdout: {}", e));
+            }
+            
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return Err("Empty response from Python (Process might have crashed)".to_string());
+            }
+
+            serde_json::from_str::<R>(trimmed).map_err(|e| format!("JSON Parse Error: {} | Input: {}", e, trimmed))
+        } else {
+            Err("Failed to open stdout".to_string())
         }
     }
 
-    // --- RESEARCH METHOD ---
-    // This calls the "Deep Research Agent" inside the Python worker.
-    pub fn research(&self, product: &str, context: &str) -> Vec<String> {
-        let mut child = self.python_process.lock().unwrap();
+    // --- API METHODS ---
 
-        // Send JSON Command
-        {
-            let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-            
-            // Construct the special "task": "research" payload
-            let request = serde_json::json!({
-                "task": "research",
-                "product": product,
-                "context": context
-            });
-            
-            let json_req = serde_json::to_string(&request).unwrap();
+    pub fn generate(&self, prompt: &str, max_tokens: usize, image_b64: Option<String>, pdf_b64: Option<String>, temp: f32) -> String {
+        let request = InferenceRequest {
+            prompt: prompt.to_string(),
+            max_tokens,
+            image: image_b64, 
+            pdf: pdf_b64,
+            temperature: temp, 
+        };
 
-            if let Err(e) = writeln!(stdin, "{}", json_req) {
-                eprintln!("🧠 ERROR: Failed to send research command: {}", e);
-                return Vec::new();
+        match self.send_command::<_, InferenceResponse>(&request) {
+            Ok(res) => {
+                if res.status == "success" {
+                    res.text.unwrap_or_default()
+                } else {
+                    format!("Error: {}", res.message.unwrap_or("Unknown".to_string()))
+                }
+            },
+            Err(e) => format!("System Error: {}", e)
+        }
+    }
+
+    pub fn query_memory(&self, query: &str) -> Vec<String> {
+        let request = serde_json::json!({
+            "task": "query_memory",
+            "query": query
+        });
+
+        #[derive(Deserialize)]
+        struct MemoryResponse {
+            status: String,
+            data: Option<Vec<String>>,
+            #[allow(dead_code)] message: Option<String>,
+        }
+
+        match self.send_command::<_, MemoryResponse>(&request) {
+            Ok(res) => {
+                if res.status == "success" {
+                    res.data.unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                eprintln!("🧠 MEMORY ERROR: {}", e);
+                Vec::new()
             }
         }
+    }
 
-        // Read Response
-        let stdout = child.stdout.as_mut().expect("Failed to open stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
+    pub fn research(&self, product: &str, context: &str) -> Vec<String> {
+        let request = serde_json::json!({
+            "task": "research",
+            "product": product,
+            "context": context
+        });
 
-        if let Err(e) = reader.read_line(&mut line) {
-             eprintln!("🧠 ERROR: Failed to read research response: {}", e);
-             return Vec::new();
-        }
-
-        // Parse Response
         #[derive(Deserialize)]
         struct ResearchResponse {
             status: String,
             research_data: Option<Vec<String>>,
-            message: Option<String>,
+            #[allow(dead_code)] message: Option<String>,
         }
 
-        let response: ResearchResponse = serde_json::from_str(&line).unwrap_or_else(|_| {
-            ResearchResponse {
-                status: "error".to_string(),
-                research_data: None,
-                message: Some(format!("Invalid JSON from Python: {}", line)),
+        match self.send_command::<_, ResearchResponse>(&request) {
+            Ok(res) => {
+                 if res.status == "success" {
+                    res.research_data.unwrap_or_default()
+                 } else {
+                    Vec::new()
+                 }
+            },
+            Err(e) => {
+                eprintln!("🧠 RESEARCH ERROR: {}", e);
+                Vec::new()
             }
-        });
-
-        if response.status == "success" {
-            response.research_data.unwrap_or_default()
-        } else {
-            eprintln!("🧠 RESEARCH ERROR: {}", response.message.unwrap_or_default());
-            Vec::new()
         }
     }
 
-    // --- NEW: FACT CHECK METHOD ---
-    // Calls the "Fact Agent" (Wikipedia + Search) in Python
     pub fn get_facts(&self, query: &str) -> String {
-        let mut child = self.python_process.lock().unwrap();
+        let request = serde_json::json!({
+            "task": "get_facts",
+            "query": query
+        });
 
-        // Send JSON Command
-        {
-            let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-            
-            let request = serde_json::json!({
-                "task": "get_facts",
-                "query": query
-            });
-            
-            let json_req = serde_json::to_string(&request).unwrap();
-
-            if let Err(e) = writeln!(stdin, "{}", json_req) {
-                eprintln!("🧠 ERROR: Failed to send fact command: {}", e);
-                return String::new();
-            }
-        }
-
-        // Read Response
-        let stdout = child.stdout.as_mut().expect("Failed to open stdout");
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-
-        if let Err(e) = reader.read_line(&mut line) {
-             eprintln!("🧠 ERROR: Failed to read fact response: {}", e);
-             return String::new();
-        }
-
-        // Parse Response
         #[derive(Deserialize)]
         struct FactResponse {
             status: String,
             fact_sheet: Option<String>,
-            message: Option<String>,
+            #[allow(dead_code)] message: Option<String>,
         }
 
-        let response: FactResponse = serde_json::from_str(&line).unwrap_or_else(|_| {
-            FactResponse {
-                status: "error".to_string(),
-                fact_sheet: None,
-                message: Some(format!("Invalid JSON from Python: {}", line)),
+        match self.send_command::<_, FactResponse>(&request) {
+            Ok(res) => {
+                if res.status == "success" {
+                    res.fact_sheet.unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            },
+            Err(e) => {
+                eprintln!("🧠 FACT ERROR: {}", e);
+                String::new()
             }
-        });
-
-        if response.status == "success" {
-            response.fact_sheet.unwrap_or_default()
-        } else {
-            eprintln!("🧠 FACT ERROR: {}", response.message.unwrap_or_default());
-            String::new()
         }
     }
 }
