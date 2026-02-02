@@ -61,7 +61,7 @@ impl PersonaGenerator {
             );
 
             // Call Python Brain with HIGH TEMPERATURE (0.8)
-            let response_text = brain.generate(&prompt, 1500, None, None, 0.8); 
+            let response_text = brain.generate(&prompt, 1000, None, None, 0.8); 
             let clean_json = clean_json_text(&response_text);
             
             // Parse & Build
