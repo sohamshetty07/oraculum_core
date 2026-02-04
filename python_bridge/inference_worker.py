@@ -31,7 +31,7 @@ MODEL_PATH = "mlx-community/Phi-3.5-vision-instruct-4bit"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2" 
 DB_PATH = "./knowledge_db" 
 USER_AGENT = 'OraculumMarketBot/1.0 (Student Project)'
-PORT = 8001 
+PORT = 8003 
 
 # --- GLOBAL STATE ---
 app = FastAPI(title="Oraculum Neural Engine")
