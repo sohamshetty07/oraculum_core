@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 // Uses 'ureq' for safe blocking HTTP calls inside Async runtimes
 use ureq; 
 
-const PYTHON_API_URL: &str = "http://127.0.0.1:8001";
+const PYTHON_API_URL: &str = "http://127.0.0.1:8003";
 
 #[derive(Serialize)]
 struct InferenceRequest {

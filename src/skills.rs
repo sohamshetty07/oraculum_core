@@ -1,15 +1,15 @@
 // src/skills.rs
 // COGNITIVE ARCHITECTURE LAYER 1: THE SKILL REGISTRY
 // Defines the capabilities an agent can "equip".
-// UPDATED: DeepResearchSkill now uses the Hybrid Memory System (LanceDB + Live Web).
+// UPDATED: Added WebScout (Sensory Cortex Integration).
 
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::brain::AgentBrain;
+use crate::systems::sensory::SensoryCortex;
 
 // 1. The Standard Input/Output for any Skill
-// This allows us to chain skills together (Output of A -> Input of B)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillInput {
     pub query: String,
@@ -24,16 +24,13 @@ pub struct SkillOutput {
 }
 
 // 2. The Skill Trait
-// Any tool (Scraper, Database, Logic) must implement this.
 pub trait AgentSkill: Send + Sync {
     fn name(&self) -> String;
     fn description(&self) -> String;
-    // We pass the 'Brain' so skills can use Python/LLM if needed
     fn execute(&self, brain: &Arc<AgentBrain>, input: SkillInput) -> SkillOutput;
 }
 
 // 3. The Registry (Singleton)
-// Maps string IDs ("web_search") to actual Rust implementations
 pub struct SkillRegistry {
     skills: HashMap<String, Box<dyn AgentSkill>>,
 }
@@ -43,9 +40,14 @@ impl SkillRegistry {
         let mut registry = Self {
             skills: HashMap::new(),
         };
+        
         // Register Core Skills
         registry.register(Box::new(DeepResearchSkill));
         registry.register(Box::new(FactCheckSkill));
+        
+        // NEW: Register the Autonomous Web Agent
+        registry.register(Box::new(WebScout)); 
+        
         registry
     }
 
@@ -65,21 +67,17 @@ impl SkillRegistry {
 // --- CORE SKILL IMPLEMENTATIONS ---
 
 // Skill 1: Deep Research (Hybrid Memory System)
-// Connects to: python_bridge 'query_memory' (LanceDB + DuckDuckGo)
 struct DeepResearchSkill;
 impl AgentSkill for DeepResearchSkill {
     fn name(&self) -> String { "deep_research".to_string() }
     fn description(&self) -> String { "Queries Cognitive Memory (Reddit/Graph) and fallback Web Search".to_string() }
     
     fn execute(&self, brain: &Arc<AgentBrain>, input: SkillInput) -> SkillOutput {
-        // CALL THE NEW MEMORY SYSTEM (Phase 2 Upgrade)
-        // This executes the 'query_memory' task in Python
         let results = brain.query_memory(&input.query);
         
         if results.is_empty() {
             SkillOutput { success: false, data: "No data found.".to_string(), metadata: "{}".to_string() }
         } else {
-            // Join the memory hits into a single context block for the Agent to read
             let combined_data = results.join("\n\n");
             SkillOutput { 
                 success: true, 
@@ -91,7 +89,6 @@ impl AgentSkill for DeepResearchSkill {
 }
 
 // Skill 2: Fact Check (Product Specs)
-// Connects to: python_bridge 'get_facts' (OpenFoodFacts)
 struct FactCheckSkill;
 impl AgentSkill for FactCheckSkill {
     fn name(&self) -> String { "fact_check".to_string() }
@@ -100,7 +97,6 @@ impl AgentSkill for FactCheckSkill {
     fn execute(&self, brain: &Arc<AgentBrain>, input: SkillInput) -> SkillOutput {
         let facts = brain.get_facts(&input.query);
         
-        // Basic validation of the result
         if facts.is_empty() || facts.contains("No structured data") {
              SkillOutput { 
                 success: false, 
@@ -112,6 +108,37 @@ impl AgentSkill for FactCheckSkill {
                 success: true, 
                 data: facts, 
                 metadata: "{\"source\": \"OpenFoodFacts\"}".to_string() 
+            }
+        }
+    }
+}
+
+// Skill 3: Web Scout (Sensory Cortex / Crawl4AI)
+// Connects to: crate::systems::sensory -> Python API (Port 8000)
+struct WebScout;
+impl AgentSkill for WebScout {
+    fn name(&self) -> String { "web_scout".to_string() }
+    fn description(&self) -> String { "Autonomous Web Agent (Crawl4AI + Qwen) that browses live sites".to_string() }
+
+    fn execute(&self, _brain: &Arc<AgentBrain>, input: SkillInput) -> SkillOutput {
+        // Identify Target
+        // For this scenario, we default to the shop, but you could parse input.query for a URL
+        let target_url = "https://scrapeme.live/shop";
+
+        println!("[SKILL] WebScout engaged. Target: {}", target_url);
+
+        // Call the Sensory Cortex (Python)
+        if let Some(knowledge) = SensoryCortex::perceive(target_url, &input.query) {
+             SkillOutput {
+                success: true,
+                data: knowledge,
+                metadata: "{\"source\": \"SensoryCortex/Crawl4AI\"}".to_string()
+            }
+        } else {
+            SkillOutput {
+                success: false,
+                data: "Sensory Cortex failed to retrieve data.".to_string(),
+                metadata: "{}".to_string()
             }
         }
     }
